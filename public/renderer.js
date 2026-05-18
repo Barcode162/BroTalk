@@ -559,8 +559,12 @@ async function init() {
       if (data.state === 'downloading') {
         const pct = data.percent ? ` (${Math.round(data.percent)}%)` : '';
         setStatus(`Downloading update v${data.version || ''}${pct}…`);
+      } else if (data.state === 'installing') {
+        setStatus(`Update v${data.version} downloaded — restarting to install…`);
       } else if (data.state === 'ready') {
         setStatus(`Update v${data.version} ready — press Ctrl+R to install`);
+      } else if (data.state === 'error') {
+        setStatus(`Update check failed: ${data.error}`);
       }
     });
   }

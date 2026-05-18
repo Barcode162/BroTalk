@@ -88,22 +88,38 @@ function setupAutoUpdater() {
   autoUpdaterRef = autoUpdater;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.disableDifferentialDownload = true;
 
-  autoUpdater.on('error', (err) => console.error('[updater] error:', err));
+  let downloadVersion = '';
+
+  autoUpdater.on('error', (err) => {
+    console.error('[updater] error:', err);
+    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'error', error: String(err && err.message || err) });
+  });
   autoUpdater.on('checking-for-update', () => console.log('[updater] checking for updates…'));
   autoUpdater.on('update-available', (info) => {
     console.log('[updater] update available:', info.version);
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', version: info.version });
+    downloadVersion = info.version;
+    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', version: info.version, percent: 0 });
   });
   autoUpdater.on('update-not-available', () => console.log('[updater] up to date'));
   autoUpdater.on('download-progress', (p) => {
     console.log(`[updater] downloading: ${Math.round(p.percent)}%`);
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', percent: p.percent });
+    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', percent: p.percent, version: downloadVersion });
   });
   autoUpdater.on('update-downloaded', (info) => {
-    console.log('[updater] downloaded; will install on quit:', info.version);
+    console.log('[updater] downloaded:', info.version, '— auto-installing in 3s');
     updateReady = true;
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'ready', version: info.version });
+    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'installing', version: info.version });
+    setTimeout(() => {
+      try {
+        autoUpdater.quitAndInstall(false, true);
+      } catch (err) {
+        console.error('[updater] auto-install failed:', err);
+        app.relaunch();
+        app.quit();
+      }
+    }, 3000);
   });
 
   setTimeout(() => {

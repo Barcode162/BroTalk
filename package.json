@@ -1,7 +1,7 @@
 {
   "name": "brotalk",
   "productName": "BroTalk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Peer-to-peer voice chat for friends and family",
   "main": "main.js",
   "type": "commonjs",
@@ -43,7 +43,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "BroTalk"
+      "shortcutName": "BroTalk",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "publish": {
       "provider": "github",
