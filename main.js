@@ -8,7 +8,7 @@ const useLocalSignaling = process.argv.includes('--local') || isDev;
 
 const SIGNALING_URL = useLocalSignaling
   ? 'ws://localhost:3000'
-  : 'wss://brotalk-signal.onrender.com';
+  : 'wss://brotalk.onrender.com';
 
 let mainWindow = null;
 
