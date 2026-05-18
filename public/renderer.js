@@ -22,7 +22,18 @@ const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
+  iceCandidatePoolSize: 4,
 };
 
 const els = {
@@ -236,6 +247,7 @@ function createPeerConnection(peerId, isInitiator) {
   if (state.peerConnections[peerId]) return state.peerConnections[peerId];
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
+  pc.pendingIce = [];
   state.peerConnections[peerId] = pc;
 
   if (state.localStream) {
@@ -286,6 +298,17 @@ function createPeerConnection(peerId, isInitiator) {
   return pc;
 }
 
+async function flushPendingIce(pc) {
+  if (!pc.pendingIce || pc.pendingIce.length === 0) return;
+  const buffered = pc.pendingIce;
+  pc.pendingIce = [];
+  for (const c of buffered) {
+    try { await pc.addIceCandidate(c); } catch (err) {
+      console.error('[renderer] buffered ICE add failed:', err);
+    }
+  }
+}
+
 function cleanupPeer(peerId) {
   const pc = state.peerConnections[peerId];
   if (pc) {
@@ -330,6 +353,7 @@ async function handleSignalingMessage(raw) {
     const pc = createPeerConnection(msg.from, false);
     try {
       await pc.setRemoteDescription(msg.sdp);
+      await flushPendingIce(pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       sendSignal({ type: 'answer', to: msg.from, sdp: pc.localDescription });
@@ -339,16 +363,22 @@ async function handleSignalingMessage(raw) {
   } else if (msg.type === 'answer') {
     const pc = state.peerConnections[msg.from];
     if (pc) {
-      try { await pc.setRemoteDescription(msg.sdp); } catch (err) {
+      try {
+        await pc.setRemoteDescription(msg.sdp);
+        await flushPendingIce(pc);
+      } catch (err) {
         console.error('[renderer] setRemoteDescription(answer) failed:', err);
       }
     }
   } else if (msg.type === 'ice') {
     const pc = state.peerConnections[msg.from];
-    if (pc && msg.candidate) {
+    if (!pc || !msg.candidate) return;
+    if (pc.remoteDescription) {
       try { await pc.addIceCandidate(msg.candidate); } catch (err) {
         console.error('[renderer] addIceCandidate failed:', err);
       }
+    } else {
+      pc.pendingIce.push(msg.candidate);
     }
   } else if (msg.type === 'peer-left') {
     cleanupPeer(msg.id);
@@ -502,10 +532,20 @@ async function init() {
     const config = await window.api.getConfig();
     state.signalingUrl = config.signalingUrl;
     document.title = `BroTalk v${config.version}`;
-    setStatus(`Ready (v${config.version})`);
+    setStatus(`Ready (v${config.version}) — Ctrl+R to restart & update`);
   } catch (err) {
     console.error('[renderer] failed to load config:', err);
     setStatus('Ready');
+  }
+  if (window.api.onUpdateStatus) {
+    window.api.onUpdateStatus((data) => {
+      if (data.state === 'downloading') {
+        const pct = data.percent ? ` (${Math.round(data.percent)}%)` : '';
+        setStatus(`Downloading update v${data.version || ''}${pct}…`);
+      } else if (data.state === 'ready') {
+        setStatus(`Update v${data.version} ready — press Ctrl+R to install`);
+      }
+    });
   }
   loadMicList();
 }
