@@ -16,25 +16,21 @@ const state = {
   analyser: null,
   analyserData: null,
   meterRaf: 0,
+  iceServers: null,
 };
 
-const RTC_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    {
-      urls: [
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443',
-        'turn:openrelay.metered.ca:443?transport=tcp',
-      ],
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-  ],
-  iceCandidatePoolSize: 4,
-};
+const DEFAULT_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
+
+function buildRtcConfig() {
+  return {
+    iceServers: state.iceServers && state.iceServers.length ? state.iceServers : DEFAULT_ICE_SERVERS,
+    iceCandidatePoolSize: 4,
+  };
+}
 
 const els = {
   setupScreen: document.getElementById('setup-screen'),
@@ -246,7 +242,7 @@ function sendSignal(msg) {
 function createPeerConnection(peerId, isInitiator) {
   if (state.peerConnections[peerId]) return state.peerConnections[peerId];
 
-  const pc = new RTCPeerConnection(RTC_CONFIG);
+  const pc = new RTCPeerConnection(buildRtcConfig());
   pc.pendingIce = [];
   state.peerConnections[peerId] = pc;
 
@@ -459,6 +455,25 @@ function setVolume(value) {
   for (const audio of Object.values(state.remoteAudios)) audio.volume = vol;
 }
 
+async function fetchIceServers() {
+  try {
+    const httpUrl = state.signalingUrl.replace(/^ws/, 'http') + '/ice-servers';
+    const res = await fetch(httpUrl, { cache: 'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!Array.isArray(data.iceServers)) throw new Error('bad response');
+    const hasTurn = data.iceServers.some((s) => {
+      const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+      return urls.some((u) => /^turns?:/i.test(u));
+    });
+    console.log(`[renderer] loaded ${data.iceServers.length} ICE servers (TURN: ${hasTurn ? 'YES' : 'NO'})`);
+    return data.iceServers;
+  } catch (err) {
+    console.error('[renderer] fetchIceServers failed, falling back to STUN only:', err);
+    return null;
+  }
+}
+
 async function connect() {
   clearError('setup');
   state.myName = (els.nameInput.value || '').trim().slice(0, 24);
@@ -477,6 +492,8 @@ async function connect() {
   try {
     await getMicStream();
     startMicMeter();
+    setStatus('Loading network config…');
+    state.iceServers = await fetchIceServers();
     setStatus('Connecting to server…');
     await connectSignaling(state.signalingUrl);
     sendSignal({ type: 'join', name: state.myName, room });

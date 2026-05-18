@@ -4,12 +4,38 @@ const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
+const TURN_USERNAME = process.env.TURN_USERNAME || '';
+const TURN_PASSWORD = process.env.TURN_PASSWORD || '';
+const TURN_URLS = (process.env.TURN_URLS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function buildIceServers() {
+  const servers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+  if (TURN_URLS.length && TURN_USERNAME && TURN_PASSWORD) {
+    servers.push({
+      urls: TURN_URLS,
+      username: TURN_USERNAME,
+      credential: TURN_PASSWORD,
+    });
+  }
+  return servers;
+}
 
 const app = express();
 
 app.get('/healthz', (req, res) => res.type('text/plain').send('ok'));
 app.get('/', (req, res) => {
   res.type('text/plain').send('BroTalk signaling server is running.');
+});
+app.get('/ice-servers', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ iceServers: buildIceServers() });
 });
 
 const httpServer = http.createServer(app);
