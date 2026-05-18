@@ -1,0 +1,54 @@
+{
+  "name": "brotalk",
+  "productName": "BroTalk",
+  "version": "0.1.0",
+  "description": "Peer-to-peer voice chat for friends and family",
+  "main": "main.js",
+  "type": "commonjs",
+  "author": "Barcode162",
+  "license": "ISC",
+  "scripts": {
+    "start": "node server.js",
+    "app": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "release": "electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "express": "^4.18.2",
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.barcode162.brotalk",
+    "productName": "BroTalk",
+    "files": [
+      "main.js",
+      "preload.js",
+      "public/**/*",
+      "node_modules/**/*",
+      "!server.js",
+      "!render.yaml",
+      "!README.md"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BroTalk"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Barcode162",
+      "repo": "BroTalk"
+    }
+  }
+}

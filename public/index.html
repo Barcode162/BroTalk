@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ws: wss: http: https:; media-src 'self' blob:;" />
+    <title>BroTalk</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>BroTalk</h1>
+        <p id="status-text">Set up and connect to talk</p>
+      </header>
+
+      <section id="setup-screen" class="screen">
+        <label class="name-label">
+          Your name
+          <input id="name-input" type="text" maxlength="24" placeholder="e.g. Josh" />
+        </label>
+        <label class="name-label">
+          Microphone
+          <select id="mic-select"></select>
+        </label>
+        <button id="btn-refresh-mics" class="link-btn">Refresh devices</button>
+        <label class="name-label">
+          Room code <span class="hint">(leave blank for the public lobby)</span>
+          <input id="room-input" type="text" maxlength="32" placeholder="e.g. brothers" autocomplete="off" />
+        </label>
+        <button id="btn-connect" class="big-btn">Connect</button>
+        <div id="setup-error" class="error hidden"></div>
+      </section>
+
+      <section id="call-screen" class="screen hidden">
+        <div class="room-header">
+          <span class="self-label">Room</span>
+          <code id="room-display">lobby</code>
+          <button id="btn-copy-room" class="small-btn">Copy</button>
+        </div>
+
+        <div class="self-panel">
+          <div class="self-row">
+            <span class="self-label">You</span>
+            <span class="self-name" id="self-name">—</span>
+          </div>
+          <div class="mic-meter" title="Your microphone level">
+            <div class="mic-meter-fill" id="mic-fill"></div>
+          </div>
+          <label class="name-label">
+            Microphone
+            <select id="call-mic-select"></select>
+          </label>
+        </div>
+
+        <div class="controls">
+          <button id="btn-mute" class="small-btn">Mute</button>
+          <label class="volume-label">
+            Volume <input id="volume-slider" type="range" min="0" max="100" value="100" />
+          </label>
+          <button id="btn-leave" class="small-btn danger">Leave</button>
+        </div>
+
+        <h3>Connected peers</h3>
+        <ul id="peers-list" class="peers-list"></ul>
+        <div id="call-error" class="error hidden"></div>
+      </section>
+
+      <div id="remote-audios" hidden></div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
