@@ -2,70 +2,200 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ws: wss: http: https:; media-src 'self' blob:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data:;" />
     <title>BroTalk</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="app">
-      <header>
-        <h1>BroTalk</h1>
-        <p id="status-text">Set up and connect to talk</p>
-      </header>
-
-      <section id="setup-screen" class="screen">
-        <label class="name-label">
-          Your name
-          <input id="name-input" type="text" maxlength="24" placeholder="e.g. Josh" />
-        </label>
-        <label class="name-label">
-          Microphone
-          <select id="mic-select"></select>
-        </label>
-        <button id="btn-refresh-mics" class="link-btn">Refresh devices</button>
-        <label class="name-label">
-          Room code <span class="hint">(leave blank for the public lobby)</span>
-          <input id="room-input" type="text" maxlength="32" placeholder="e.g. brothers" autocomplete="off" />
-        </label>
-        <button id="btn-connect" class="big-btn">Connect</button>
-        <div id="setup-error" class="error hidden"></div>
-      </section>
-
-      <section id="call-screen" class="screen hidden">
-        <div class="room-header">
-          <span class="self-label">Room</span>
-          <code id="room-display">lobby</code>
-          <button id="btn-copy-room" class="small-btn">Copy</button>
-        </div>
-
-        <div class="self-panel">
-          <div class="self-row">
-            <span class="self-label">You</span>
-            <span class="self-name" id="self-name">—</span>
+      <aside class="sidebar">
+        <div class="sidebar-top">
+          <div class="logo">
+            <span class="logo-mark" aria-hidden="true"></span>
+            <span class="logo-text">BroTalk</span>
           </div>
-          <div class="mic-meter" title="Your microphone level">
-            <div class="mic-meter-fill" id="mic-fill"></div>
-          </div>
-          <label class="name-label">
-            Microphone
-            <select id="call-mic-select"></select>
-          </label>
         </div>
 
-        <div class="controls">
-          <button id="btn-mute" class="small-btn">Mute</button>
-          <label class="volume-label">
-            Volume <input id="volume-slider" type="range" min="0" max="100" value="100" />
-          </label>
-          <button id="btn-leave" class="small-btn danger">Leave</button>
+        <button id="btn-new-room" class="btn-primary sidebar-cta">
+          <span class="icon" aria-hidden="true">+</span>
+          <span>New room</span>
+        </button>
+
+        <div class="sidebar-section">
+          <div class="sidebar-section-title">Recent</div>
+          <ul id="recent-rooms" class="recent-list" aria-label="Recent rooms"></ul>
         </div>
 
-        <h3>Connected peers</h3>
-        <ul id="peers-list" class="peers-list"></ul>
-        <div id="call-error" class="error hidden"></div>
-      </section>
+        <div class="sidebar-footer">
+          <button id="btn-profile" class="profile-chip">
+            <span class="avatar" id="profile-avatar">?</span>
+            <span class="profile-info">
+              <span class="profile-name" id="profile-name">Sign in</span>
+              <span class="profile-sub" id="profile-sub">Guest</span>
+            </span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title" id="topbar-title">Welcome</div>
+          <div class="topbar-meta" id="topbar-meta"></div>
+        </header>
+
+        <div class="content">
+          <!-- Auth screen -->
+          <section id="screen-auth" class="screen">
+            <div class="card auth-card">
+              <div class="auth-tabs" role="tablist">
+                <button id="tab-signin" class="tab active" role="tab" aria-selected="true">Sign in</button>
+                <button id="tab-signup" class="tab" role="tab" aria-selected="false">Create account</button>
+              </div>
+
+              <form id="form-signin" class="auth-form" autocomplete="on">
+                <h2 class="form-title">Welcome back</h2>
+                <p class="form-subtitle">Sign in to join named rooms.</p>
+                <label class="field">
+                  <span class="field-label">Username</span>
+                  <input id="signin-username" type="text" maxlength="24" autocomplete="username" required />
+                </label>
+                <label class="field">
+                  <span class="field-label">Password</span>
+                  <input id="signin-password" type="password" maxlength="200" autocomplete="current-password" required />
+                </label>
+                <button type="submit" class="btn-primary btn-block">Sign in</button>
+                <div id="signin-error" class="error hidden"></div>
+                <button type="button" id="btn-guest" class="btn-link">Continue as guest →</button>
+              </form>
+
+              <form id="form-signup" class="auth-form hidden" autocomplete="on">
+                <h2 class="form-title">Create your account</h2>
+                <p class="form-subtitle">3–24 characters, letters/numbers/underscore/hyphen.</p>
+                <label class="field">
+                  <span class="field-label">Username</span>
+                  <input id="signup-username" type="text" maxlength="24" autocomplete="username" required />
+                </label>
+                <label class="field">
+                  <span class="field-label">Password</span>
+                  <input id="signup-password" type="password" maxlength="200" minlength="8" autocomplete="new-password" required />
+                  <span class="field-hint">At least 8 characters.</span>
+                </label>
+                <button type="submit" class="btn-primary btn-block">Create account</button>
+                <div id="signup-error" class="error hidden"></div>
+              </form>
+            </div>
+          </section>
+
+          <!-- Home screen -->
+          <section id="screen-home" class="screen hidden">
+            <div class="hero">
+              <h1 class="hero-title">Ready to talk.</h1>
+              <p class="hero-subtitle" id="hero-subtitle">Hop into a room and start a conversation.</p>
+            </div>
+
+            <div class="cards-row">
+              <div class="card action-card">
+                <div class="action-header">
+                  <span class="action-icon">⚡</span>
+                  <h3>Public lobby</h3>
+                </div>
+                <p class="action-desc">Anyone can join. No account needed.</p>
+                <button id="btn-join-lobby" class="btn-secondary btn-block">Join lobby</button>
+              </div>
+
+              <div class="card action-card">
+                <div class="action-header">
+                  <span class="action-icon">🔒</span>
+                  <h3>Named room</h3>
+                </div>
+                <p class="action-desc" id="named-room-desc">Pick a code, share it with friends.</p>
+                <form id="form-join-room" class="join-form">
+                  <input id="room-input" class="field-input" type="text" maxlength="32" placeholder="room code (e.g. brothers)" autocomplete="off" />
+                  <button type="submit" class="btn-primary">Enter</button>
+                </form>
+                <div id="room-form-error" class="error hidden"></div>
+              </div>
+            </div>
+
+            <div class="card setup-card">
+              <h3 class="setup-title">Audio setup</h3>
+              <label class="field">
+                <span class="field-label">Microphone</span>
+                <select id="mic-select" class="field-input"></select>
+              </label>
+              <button id="btn-refresh-mics" class="btn-link">Refresh devices</button>
+            </div>
+          </section>
+
+          <!-- Call screen -->
+          <section id="screen-call" class="screen hidden">
+            <div class="call-header">
+              <div class="room-pill">
+                <span class="room-pill-dot"></span>
+                <span class="room-pill-label">Room</span>
+                <code id="room-display">lobby</code>
+                <button id="btn-copy-room" class="btn-ghost-sm" title="Copy room code">Copy</button>
+              </div>
+              <button id="btn-leave" class="btn-danger-sm">Leave room</button>
+            </div>
+
+            <div class="card self-card">
+              <div class="self-head">
+                <span class="avatar" id="self-avatar">?</span>
+                <div class="self-info">
+                  <span class="self-name" id="self-name">—</span>
+                  <span class="self-role" id="self-role">You</span>
+                </div>
+              </div>
+              <div class="mic-meter" title="Your microphone level">
+                <div class="mic-meter-fill" id="mic-fill"></div>
+              </div>
+            </div>
+
+            <div class="card peers-card">
+              <h3 class="card-title">Connected peers</h3>
+              <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
+            </div>
+
+            <div class="control-bar">
+              <button id="btn-mute" class="btn-control" aria-pressed="false">
+                <span class="control-label">Mute</span>
+              </button>
+              <div class="volume-control">
+                <span class="control-label-sm">Volume</span>
+                <input id="volume-slider" type="range" min="0" max="100" value="100" />
+              </div>
+              <label class="control-mic">
+                <span class="control-label-sm">Mic</span>
+                <select id="call-mic-select" class="field-input field-input-sm"></select>
+              </label>
+            </div>
+
+            <div id="call-error" class="error hidden"></div>
+          </section>
+
+          <!-- Profile screen -->
+          <section id="screen-profile" class="screen hidden">
+            <div class="card profile-card">
+              <div class="profile-head">
+                <span class="avatar avatar-lg" id="profile-avatar-lg">?</span>
+                <div>
+                  <h2 class="profile-display-name" id="profile-display-name">—</h2>
+                  <p class="profile-sub-lg" id="profile-sub-lg">—</p>
+                </div>
+              </div>
+              <dl class="profile-details" id="profile-details"></dl>
+              <div class="profile-actions">
+                <button id="btn-back-home" class="btn-secondary">Back</button>
+                <button id="btn-logout" class="btn-danger">Sign out</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
 
       <div id="remote-audios" hidden></div>
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
     </div>
 
     <script src="renderer.js"></script>

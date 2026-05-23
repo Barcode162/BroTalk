@@ -1,13 +1,27 @@
+/* ============================================================
+ * BroTalk renderer
+ * ============================================================ */
+
+const LS_TOKEN = 'brotalk.token';
+const LS_RECENT = 'brotalk.recentRooms';
+const MAX_RECENT = 8;
+
 const state = {
+  auth: null,                      // { token, user: { id, username } } | null
   signaling: null,
   signalingUrl: '',
+  httpBaseUrl: '',
+  appVersion: '',
   localStream: null,
   peerConnections: {},
   remoteAudios: {},
   peerNames: {},
+  peerAuthed: {},
   myPeerId: null,
   myName: '',
   myRoom: '',
+  pendingRoom: '',
+  pendingMode: 'auth',             // 'auth' | 'lobby' | 'named'
   isMuted: false,
   masterVolume: 1.0,
   selectedDeviceId: '',
@@ -17,6 +31,8 @@ const state = {
   analyserData: null,
   meterRaf: 0,
   iceServers: null,
+  currentScreen: 'auth',
+  recentRooms: [],
 };
 
 const DEFAULT_ICE_SERVERS = [
@@ -32,48 +48,35 @@ function buildRtcConfig() {
   };
 }
 
-const els = {
-  setupScreen: document.getElementById('setup-screen'),
-  callScreen: document.getElementById('call-screen'),
-  statusText: document.getElementById('status-text'),
-  nameInput: document.getElementById('name-input'),
-  roomInput: document.getElementById('room-input'),
-  micSelect: document.getElementById('mic-select'),
-  callMicSelect: document.getElementById('call-mic-select'),
-  btnRefreshMics: document.getElementById('btn-refresh-mics'),
-  btnConnect: document.getElementById('btn-connect'),
-  btnMute: document.getElementById('btn-mute'),
-  btnLeave: document.getElementById('btn-leave'),
-  btnCopyRoom: document.getElementById('btn-copy-room'),
-  volumeSlider: document.getElementById('volume-slider'),
-  roomDisplay: document.getElementById('room-display'),
-  selfName: document.getElementById('self-name'),
-  micFill: document.getElementById('mic-fill'),
-  peersList: document.getElementById('peers-list'),
-  setupError: document.getElementById('setup-error'),
-  callError: document.getElementById('call-error'),
-  remoteAudios: document.getElementById('remote-audios'),
-};
-
-function showScreen(name) {
-  els.setupScreen.classList.toggle('hidden', name !== 'setup');
-  els.callScreen.classList.toggle('hidden', name !== 'call');
+const els = {};
+function bindEls() {
+  const ids = [
+    'screen-auth', 'screen-home', 'screen-call', 'screen-profile',
+    'tab-signin', 'tab-signup',
+    'form-signin', 'form-signup',
+    'signin-username', 'signin-password', 'signin-error',
+    'signup-username', 'signup-password', 'signup-error',
+    'btn-guest',
+    'btn-new-room', 'btn-join-lobby',
+    'form-join-room', 'room-input', 'room-form-error',
+    'hero-subtitle', 'named-room-desc',
+    'mic-select', 'call-mic-select', 'btn-refresh-mics',
+    'topbar-title', 'topbar-meta',
+    'profile-avatar', 'profile-name', 'profile-sub',
+    'profile-avatar-lg', 'profile-display-name', 'profile-sub-lg', 'profile-details',
+    'btn-profile', 'btn-back-home', 'btn-logout',
+    'recent-rooms',
+    'room-display', 'btn-copy-room', 'btn-leave',
+    'self-avatar', 'self-name', 'self-role', 'mic-fill',
+    'btn-mute', 'volume-slider',
+    'peers-list', 'call-error', 'remote-audios',
+    'toast',
+  ];
+  for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
 
-function setStatus(text) {
-  els.statusText.textContent = text;
-}
-
-function showError(scope, msg) {
-  const el = scope === 'setup' ? els.setupError : els.callError;
-  el.textContent = msg;
-  el.classList.remove('hidden');
-}
-
-function clearError(scope) {
-  const el = scope === 'setup' ? els.setupError : els.callError;
-  el.textContent = '';
-  el.classList.add('hidden');
+function camel(s) {
+  return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 }
 
 function escapeHtml(s) {
@@ -85,17 +88,267 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function renderPeersList() {
-  els.peersList.innerHTML = '';
-  for (const id of Object.keys(state.peerConnections)) {
-    const li = document.createElement('li');
-    const conn = state.peerConnections[id];
-    const connState = conn ? conn.connectionState || 'connecting' : 'unknown';
-    const name = state.peerNames[id] || '(unnamed)';
-    li.innerHTML = `<span><span class="status-dot"></span><span class="peer-name">${escapeHtml(name)}</span><span class="peer-id">${id.slice(0, 6)}</span></span><span>${connState}</span>`;
-    els.peersList.appendChild(li);
+function initialOf(name) {
+  const c = (name || '?').trim().charAt(0).toUpperCase();
+  return c || '?';
+}
+
+/* ── Toast ───────────────────────────────────────── */
+
+let toastTimer = 0;
+function toast(msg, ms = 2400) {
+  els.toast.textContent = msg;
+  els.toast.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.classList.add('hidden'), ms);
+}
+
+/* ── Screen routing ──────────────────────────────── */
+
+function showScreen(name) {
+  state.currentScreen = name;
+  for (const k of ['screenAuth', 'screenHome', 'screenCall', 'screenProfile']) {
+    els[k].classList.toggle('hidden', k !== 'screen' + name.charAt(0).toUpperCase() + name.slice(1));
+  }
+  const titles = {
+    auth: 'Welcome',
+    home: 'Home',
+    call: `Room · ${state.myRoom || ''}`,
+    profile: 'Profile',
+  };
+  els.topbarTitle.textContent = titles[name] || 'BroTalk';
+  updateTopbarMeta();
+}
+
+function updateTopbarMeta() {
+  const v = state.appVersion ? `v${state.appVersion}` : '';
+  const acct = state.auth ? `· @${state.auth.user.username}` : '· guest';
+  els.topbarMeta.textContent = `${v} ${acct}`.trim();
+}
+
+/* ── Error helpers ───────────────────────────────── */
+
+function showError(el, msg) {
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+function clearError(el) {
+  el.textContent = '';
+  el.classList.add('hidden');
+}
+
+/* ── Profile UI ──────────────────────────────────── */
+
+function renderProfileChip() {
+  if (state.auth) {
+    const u = state.auth.user.username;
+    els.profileAvatar.textContent = initialOf(u);
+    els.profileName.textContent = u;
+    els.profileSub.textContent = 'View profile';
+  } else {
+    els.profileAvatar.textContent = '?';
+    els.profileName.textContent = 'Sign in';
+    els.profileSub.textContent = 'Guest';
   }
 }
+
+function renderProfileScreen() {
+  if (!state.auth) {
+    showScreen('auth');
+    return;
+  }
+  const u = state.auth.user;
+  els.profileAvatarLg.textContent = initialOf(u.username);
+  els.profileDisplayName.textContent = u.username;
+  els.profileSubLg.textContent = 'Signed in';
+  els.profileDetails.innerHTML = `
+    <dt>Username</dt><dd>${escapeHtml(u.username)}</dd>
+    <dt>User ID</dt><dd>${escapeHtml(u.id)}</dd>
+    <dt>Session</dt><dd>active</dd>
+  `;
+}
+
+/* ── Recent rooms ────────────────────────────────── */
+
+function loadRecent() {
+  try {
+    const raw = localStorage.getItem(LS_RECENT);
+    state.recentRooms = raw ? JSON.parse(raw) : [];
+  } catch {
+    state.recentRooms = [];
+  }
+}
+
+function saveRecent() {
+  try { localStorage.setItem(LS_RECENT, JSON.stringify(state.recentRooms)); } catch {}
+}
+
+function pushRecent(room) {
+  if (!room || room === 'lobby') return;
+  state.recentRooms = [room, ...state.recentRooms.filter((r) => r !== room)].slice(0, MAX_RECENT);
+  saveRecent();
+  renderRecent();
+}
+
+function renderRecent() {
+  els.recentRooms.innerHTML = '';
+  for (const r of state.recentRooms) {
+    const li = document.createElement('li');
+    li.dataset.room = r;
+    li.innerHTML = `<span class="recent-dot"></span><span>${escapeHtml(r)}</span>`;
+    li.addEventListener('click', () => requestJoinRoom(r));
+    els.recentRooms.appendChild(li);
+  }
+}
+
+/* ── Auth ────────────────────────────────────────── */
+
+function loadStoredAuth() {
+  try {
+    const token = localStorage.getItem(LS_TOKEN);
+    if (!token) return null;
+    return { token, user: null };
+  } catch {
+    return null;
+  }
+}
+
+function setAuth(auth) {
+  state.auth = auth;
+  if (auth && auth.token) {
+    try { localStorage.setItem(LS_TOKEN, auth.token); } catch {}
+  } else {
+    try { localStorage.removeItem(LS_TOKEN); } catch {}
+  }
+  renderProfileChip();
+  updateTopbarMeta();
+  updateHomeForAuth();
+}
+
+async function apiSignup(username, password) {
+  const res = await fetch(state.httpBaseUrl + '/auth/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Signup failed');
+  return data;
+}
+
+async function apiLogin(username, password) {
+  const res = await fetch(state.httpBaseUrl + '/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Login failed');
+  return data;
+}
+
+async function apiMe(token) {
+  const res = await fetch(state.httpBaseUrl + '/auth/me', {
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  if (!res.ok) throw new Error('Session expired');
+  return res.json();
+}
+
+async function restoreSession() {
+  const stored = loadStoredAuth();
+  if (!stored || !stored.token) return false;
+  try {
+    const me = await apiMe(stored.token);
+    setAuth({ token: stored.token, user: me.user });
+    return true;
+  } catch {
+    setAuth(null);
+    return false;
+  }
+}
+
+/* ── Home UI ─────────────────────────────────────── */
+
+function updateHomeForAuth() {
+  if (state.auth) {
+    els.heroSubtitle.textContent = `Welcome back, ${state.auth.user.username}.`;
+    els.namedRoomDesc.textContent = 'Pick a code, share it with friends.';
+    els.roomInput.disabled = false;
+  } else {
+    els.heroSubtitle.textContent = 'Hop into the public lobby — or sign in to use named rooms.';
+    els.namedRoomDesc.textContent = 'Sign in to create or join a named room.';
+    els.roomInput.disabled = true;
+  }
+}
+
+/* ── Auth screen behaviors ───────────────────────── */
+
+function switchAuthTab(which) {
+  const isSignin = which === 'signin';
+  els.tabSignin.classList.toggle('active', isSignin);
+  els.tabSignup.classList.toggle('active', !isSignin);
+  els.tabSignin.setAttribute('aria-selected', String(isSignin));
+  els.tabSignup.setAttribute('aria-selected', String(!isSignin));
+  els.formSignin.classList.toggle('hidden', !isSignin);
+  els.formSignup.classList.toggle('hidden', isSignin);
+  clearError(els.signinError);
+  clearError(els.signupError);
+}
+
+async function handleSignin(ev) {
+  ev.preventDefault();
+  clearError(els.signinError);
+  const username = els.signinUsername.value.trim();
+  const password = els.signinPassword.value;
+  if (!username || !password) {
+    showError(els.signinError, 'Enter your username and password.');
+    return;
+  }
+  const btn = els.formSignin.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    const data = await apiLogin(username, password);
+    setAuth({ token: data.token, user: data.user });
+    toast(`Signed in as ${data.user.username}`);
+    els.signinPassword.value = '';
+    showScreen('home');
+  } catch (err) {
+    showError(els.signinError, err.message || 'Sign-in failed.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function handleSignup(ev) {
+  ev.preventDefault();
+  clearError(els.signupError);
+  const username = els.signupUsername.value.trim();
+  const password = els.signupPassword.value;
+  if (!/^[A-Za-z0-9_-]{3,24}$/.test(username)) {
+    showError(els.signupError, 'Username must be 3–24 chars (letters/numbers/_/-).');
+    return;
+  }
+  if (password.length < 8) {
+    showError(els.signupError, 'Password must be at least 8 characters.');
+    return;
+  }
+  const btn = els.formSignup.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    const data = await apiSignup(username, password);
+    setAuth({ token: data.token, user: data.user });
+    toast(`Welcome, ${data.user.username}!`);
+    els.signupPassword.value = '';
+    showScreen('home');
+  } catch (err) {
+    showError(els.signupError, err.message || 'Signup failed.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Mic handling ────────────────────────────────── */
 
 function buildAudioConstraints(deviceId) {
   const audio = {
@@ -110,9 +363,7 @@ function buildAudioConstraints(deviceId) {
 async function getMicStream() {
   if (state.localStream) return state.localStream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(
-      buildAudioConstraints(state.selectedDeviceId)
-    );
+    const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints(state.selectedDeviceId));
     state.localStream = stream;
     loadMicList();
     return stream;
@@ -141,6 +392,7 @@ async function loadMicList() {
 function populateMicSelects() {
   const targets = [els.micSelect, els.callMicSelect];
   for (const sel of targets) {
+    if (!sel) continue;
     sel.innerHTML = '';
     if (state.availableMics.length === 0) {
       const opt = document.createElement('option');
@@ -210,7 +462,7 @@ function startMicMeter() {
       }
       const rms = Math.sqrt(sum / state.analyserData.length);
       const pct = Math.min(100, Math.round(rms * 400));
-      els.micFill.style.width = (state.isMuted ? 0 : pct) + '%';
+      if (els.micFill) els.micFill.style.width = (state.isMuted ? 0 : pct) + '%';
       state.meterRaf = requestAnimationFrame(tick);
     };
     state.meterRaf = requestAnimationFrame(tick);
@@ -230,8 +482,10 @@ function stopMicMeter() {
     try { state.audioCtx.close(); } catch {}
     state.audioCtx = null;
   }
-  els.micFill.style.width = '0%';
+  if (els.micFill) els.micFill.style.width = '0%';
 }
+
+/* ── WebRTC / signaling ──────────────────────────── */
 
 function sendSignal(msg) {
   if (state.signaling && state.signaling.readyState === WebSocket.OPEN) {
@@ -320,6 +574,30 @@ function cleanupPeer(peerId) {
   renderPeersList();
 }
 
+function renderPeersList() {
+  els.peersList.innerHTML = '';
+  for (const id of Object.keys(state.peerConnections)) {
+    const li = document.createElement('li');
+    const conn = state.peerConnections[id];
+    const connState = conn ? conn.connectionState || 'connecting' : 'unknown';
+    const name = state.peerNames[id] || '(unnamed)';
+    const authed = !!state.peerAuthed[id];
+    const dotClass =
+      connState === 'connected' ? 'connected' :
+      connState === 'failed' || connState === 'closed' ? 'failed' :
+      'connecting';
+    li.innerHTML = `
+      <span class="peer-avatar">${escapeHtml(initialOf(name))}</span>
+      <div class="peer-main">
+        <span class="peer-name">${escapeHtml(name)}${authed ? '<span class="peer-badge" style="margin-left:6px">verified</span>' : ''}</span>
+        <span class="peer-meta">${id.slice(0, 6)}</span>
+      </div>
+      <span class="peer-state"><span class="peer-state-dot ${dotClass}"></span>${escapeHtml(connState)}</span>
+    `;
+    els.peersList.appendChild(li);
+  }
+}
+
 async function handleSignalingMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
@@ -327,12 +605,18 @@ async function handleSignalingMessage(raw) {
   if (msg.type === 'welcome') {
     state.myPeerId = msg.id;
     state.myRoom = msg.room;
+    state.myName = msg.name || state.myName;
     els.roomDisplay.textContent = msg.room;
-    setStatus(`In room "${msg.room}" as ${state.myName || msg.id.slice(0, 8)}`);
+    els.selfName.textContent = state.myName || msg.id.slice(0, 8);
+    els.selfAvatar.textContent = initialOf(state.myName);
+    els.selfRole.textContent = state.auth ? 'You · signed in' : 'You · guest';
+    els.topbarTitle.textContent = `Room · ${msg.room}`;
+    pushRecent(msg.room);
   } else if (msg.type === 'peers') {
     const incomingIds = msg.peers.map((p) => p.id);
     for (const p of msg.peers) {
       state.peerNames[p.id] = p.name || '';
+      state.peerAuthed[p.id] = !!p.authed;
       if (!state.peerConnections[p.id] && p.id !== state.myPeerId) {
         const initiator = state.myPeerId && state.myPeerId < p.id;
         createPeerConnection(p.id, initiator);
@@ -342,7 +626,10 @@ async function handleSignalingMessage(raw) {
       if (!incomingIds.includes(id)) cleanupPeer(id);
     }
     for (const id of Object.keys(state.peerNames)) {
-      if (!incomingIds.includes(id)) delete state.peerNames[id];
+      if (!incomingIds.includes(id)) {
+        delete state.peerNames[id];
+        delete state.peerAuthed[id];
+      }
     }
     renderPeersList();
   } else if (msg.type === 'offer') {
@@ -379,6 +666,12 @@ async function handleSignalingMessage(raw) {
   } else if (msg.type === 'peer-left') {
     cleanupPeer(msg.id);
     delete state.peerNames[msg.id];
+    delete state.peerAuthed[msg.id];
+  } else if (msg.type === 'join-error') {
+    showError(els.callError, msg.error || 'Failed to join');
+    toast(msg.error || 'Failed to join', 3500);
+    disconnectAll();
+    showScreen('home');
   }
 }
 
@@ -411,7 +704,7 @@ function connectSignaling(url) {
       }
     };
     ws.onclose = () => {
-      setStatus('Disconnected from server');
+      // No-op; state.signaling becomes invalid until reconnect
     };
     ws.onmessage = (ev) => handleSignalingMessage(ev.data);
   });
@@ -431,14 +724,15 @@ function disconnectAll() {
   state.myPeerId = null;
   state.myRoom = '';
   state.peerNames = {};
+  state.peerAuthed = {};
   state.isMuted = false;
   setMuteButton(false);
   renderPeersList();
 }
 
 function setMuteButton(muted) {
-  els.btnMute.textContent = muted ? 'Unmute' : 'Mute';
-  els.btnMute.classList.toggle('muted-btn', muted);
+  els.btnMute.querySelector('.control-label').textContent = muted ? 'Unmute' : 'Mute';
+  els.btnMute.setAttribute('aria-pressed', String(muted));
 }
 
 function setMuted(muted) {
@@ -457,16 +751,10 @@ function setVolume(value) {
 
 async function fetchIceServers() {
   try {
-    const httpUrl = state.signalingUrl.replace(/^ws/, 'http') + '/ice-servers';
-    const res = await fetch(httpUrl, { cache: 'no-cache' });
+    const res = await fetch(state.httpBaseUrl + '/ice-servers', { cache: 'no-cache' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (!Array.isArray(data.iceServers)) throw new Error('bad response');
-    const hasTurn = data.iceServers.some((s) => {
-      const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
-      return urls.some((u) => /^turns?:/i.test(u));
-    });
-    console.log(`[renderer] loaded ${data.iceServers.length} ICE servers (TURN: ${hasTurn ? 'YES' : 'NO'})`);
     return data.iceServers;
   } catch (err) {
     console.error('[renderer] fetchIceServers failed, falling back to STUN only:', err);
@@ -474,100 +762,179 @@ async function fetchIceServers() {
   }
 }
 
-async function connect() {
-  clearError('setup');
-  state.myName = (els.nameInput.value || '').trim().slice(0, 24);
-  els.selfName.textContent = state.myName || '(unnamed)';
+/* ── Room join orchestration ─────────────────────── */
 
-  const room = (els.roomInput.value || '').trim().slice(0, 32);
+function requestJoinRoom(roomCode) {
+  const room = (roomCode || '').toLowerCase().trim();
+  clearError(els.roomFormError);
+  clearError(els.callError);
 
-  if (!state.signalingUrl) {
-    showError('setup', 'No signaling server URL configured yet.');
+  if (!room) {
+    showError(els.roomFormError, 'Enter a room code.');
     return;
   }
+  if (!/^[a-z0-9-_]{1,32}$/i.test(room)) {
+    showError(els.roomFormError, 'Use letters, numbers, _ or - (1–32 chars).');
+    return;
+  }
+  if (room !== 'lobby' && !state.auth) {
+    showError(els.roomFormError, 'Sign in to join named rooms.');
+    return;
+  }
+  state.pendingMode = 'named';
+  doConnect(room);
+}
 
-  els.btnConnect.disabled = true;
-  setStatus('Acquiring microphone…');
+function joinLobby() {
+  state.pendingMode = 'lobby';
+  doConnect('lobby');
+}
+
+async function doConnect(room) {
+  if (!state.signalingUrl) {
+    toast('No signaling URL configured.', 3500);
+    return;
+  }
+  toast('Connecting…');
 
   try {
     await getMicStream();
     startMicMeter();
-    setStatus('Loading network config…');
     state.iceServers = await fetchIceServers();
-    setStatus('Connecting to server…');
     await connectSignaling(state.signalingUrl);
-    sendSignal({ type: 'join', name: state.myName, room });
+    const join = { type: 'join', room };
+    if (state.auth) {
+      join.token = state.auth.token;
+    } else {
+      join.name = 'guest';
+    }
+    sendSignal(join);
     showScreen('call');
   } catch (err) {
     console.error('[renderer] connect failed:', err);
-    showError('setup', err.message);
-    setStatus('Connect failed');
+    toast(err.message || 'Connect failed', 3500);
     disconnectAll();
-  } finally {
-    els.btnConnect.disabled = false;
   }
 }
 
+/* ── Wiring ──────────────────────────────────────── */
+
 function attachEvents() {
-  els.btnConnect.addEventListener('click', connect);
+  els.tabSignin.addEventListener('click', () => switchAuthTab('signin'));
+  els.tabSignup.addEventListener('click', () => switchAuthTab('signup'));
+  els.formSignin.addEventListener('submit', handleSignin);
+  els.formSignup.addEventListener('submit', handleSignup);
+  els.btnGuest.addEventListener('click', () => {
+    setAuth(null);
+    showScreen('home');
+  });
+
+  els.btnNewRoom.addEventListener('click', () => {
+    if (state.currentScreen !== 'home') showScreen('home');
+    els.roomInput.focus();
+  });
+
+  els.btnJoinLobby.addEventListener('click', joinLobby);
+
+  els.formJoinRoom.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    requestJoinRoom(els.roomInput.value);
+  });
+
   els.btnLeave.addEventListener('click', () => {
     disconnectAll();
-    showScreen('setup');
-    setStatus('Disconnected');
+    showScreen('home');
+    toast('Left room');
   });
+
   els.btnMute.addEventListener('click', () => setMuted(!state.isMuted));
   els.volumeSlider.addEventListener('input', (e) => setVolume(+e.target.value));
+
   els.btnCopyRoom.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(state.myRoom);
-      els.btnCopyRoom.textContent = 'Copied!';
-      setTimeout(() => (els.btnCopyRoom.textContent = 'Copy'), 1200);
+      toast('Room code copied');
     } catch (err) {
       console.error('[renderer] copy failed:', err);
     }
-  });
-  els.roomInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') connect();
-  });
-  els.nameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') els.roomInput.focus();
   });
 
   const onMicChange = (e) => switchMicDevice(e.target.value);
   els.micSelect.addEventListener('change', onMicChange);
   els.callMicSelect.addEventListener('change', onMicChange);
   els.btnRefreshMics.addEventListener('click', loadMicList);
+
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener('devicechange', loadMicList);
   }
+
+  els.btnProfile.addEventListener('click', () => {
+    if (state.auth) {
+      renderProfileScreen();
+      showScreen('profile');
+    } else {
+      showScreen('auth');
+    }
+  });
+
+  els.btnBackHome.addEventListener('click', () => showScreen('home'));
+
+  els.btnLogout.addEventListener('click', () => {
+    setAuth(null);
+    toast('Signed out');
+    showScreen('auth');
+    switchAuthTab('signin');
+  });
 }
 
 async function init() {
+  bindEls();
   attachEvents();
-  showScreen('setup');
-  try {
-    const config = await window.api.getConfig();
-    state.signalingUrl = config.signalingUrl;
-    document.title = `BroTalk v${config.version}`;
-    setStatus(`Ready (v${config.version}) — Ctrl+R to restart & update`);
-  } catch (err) {
-    console.error('[renderer] failed to load config:', err);
-    setStatus('Ready');
+  loadRecent();
+  renderRecent();
+  renderProfileChip();
+
+  const hasApi = typeof window.api === 'object' && window.api !== null;
+  if (hasApi && typeof window.api.getConfig === 'function') {
+    try {
+      const config = await window.api.getConfig();
+      state.signalingUrl = config.signalingUrl;
+      state.httpBaseUrl = config.signalingUrl.replace(/^ws(s?):/, 'http$1:');
+      state.appVersion = config.version || '';
+      document.title = `BroTalk v${config.version}`;
+    } catch (err) {
+      console.error('[renderer] failed to load config:', err);
+    }
+  } else {
+    console.warn('[renderer] window.api missing — running in browser preview mode');
+    state.signalingUrl = '';
+    state.httpBaseUrl = '';
+    state.appVersion = 'preview';
   }
-  if (window.api.onUpdateStatus) {
+
+  updateTopbarMeta();
+
+  const restored = state.httpBaseUrl ? await restoreSession() : false;
+  if (restored) {
+    showScreen('home');
+  } else {
+    showScreen('auth');
+    switchAuthTab('signin');
+  }
+
+  if (hasApi && typeof window.api.onUpdateStatus === 'function') {
     window.api.onUpdateStatus((data) => {
       if (data.state === 'downloading') {
         const pct = data.percent ? ` (${Math.round(data.percent)}%)` : '';
-        setStatus(`Downloading update v${data.version || ''}${pct}…`);
+        toast(`Downloading update v${data.version || ''}${pct}`);
       } else if (data.state === 'installing') {
-        setStatus(`Update v${data.version} downloaded — restarting to install…`);
-      } else if (data.state === 'ready') {
-        setStatus(`Update v${data.version} ready — press Ctrl+R to install`);
+        toast(`Update v${data.version} downloaded — restarting…`, 4000);
       } else if (data.state === 'error') {
-        setStatus(`Update check failed: ${data.error}`);
+        toast(`Update check failed: ${data.error}`, 4000);
       }
     });
   }
+
   loadMicList();
 }
 
