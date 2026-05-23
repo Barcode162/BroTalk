@@ -33,7 +33,11 @@ const state = {
   iceServers: null,
   currentScreen: 'auth',
   recentRooms: [],
+  onlineCount: null,
+  onlinePollTimer: 0,
 };
+
+const ONLINE_POLL_MS = 15000;
 
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -71,6 +75,7 @@ function bindEls() {
     'btn-mute', 'volume-slider',
     'peers-list', 'call-error', 'remote-audios',
     'toast',
+    'online-pill', 'online-count',
   ];
   for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
@@ -101,6 +106,51 @@ function toast(msg, ms = 2400) {
   els.toast.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => els.toast.classList.add('hidden'), ms);
+}
+
+/* ── Online counter ──────────────────────────────── */
+
+function renderOnlineCount() {
+  if (!els.onlinePill) return;
+  if (state.onlineCount === null) {
+    els.onlineCount.textContent = '—';
+    els.onlinePill.classList.add('is-stale');
+  } else {
+    els.onlineCount.textContent = String(state.onlineCount);
+    els.onlinePill.classList.remove('is-stale');
+  }
+}
+
+function setOnlineCount(n) {
+  if (typeof n !== 'number' || !isFinite(n) || n < 0) return;
+  state.onlineCount = Math.floor(n);
+  renderOnlineCount();
+}
+
+async function fetchOnlineCount() {
+  if (!state.httpBaseUrl) return;
+  try {
+    const res = await fetch(state.httpBaseUrl + '/stats', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    setOnlineCount(data.online);
+  } catch (err) {
+    console.warn('[renderer] fetchOnlineCount failed:', err.message);
+  }
+}
+
+function startOnlinePolling() {
+  stopOnlinePolling();
+  if (!state.httpBaseUrl) return;
+  fetchOnlineCount();
+  state.onlinePollTimer = setInterval(fetchOnlineCount, ONLINE_POLL_MS);
+}
+
+function stopOnlinePolling() {
+  if (state.onlinePollTimer) {
+    clearInterval(state.onlinePollTimer);
+    state.onlinePollTimer = 0;
+  }
 }
 
 /* ── Screen routing ──────────────────────────────── */
@@ -667,10 +717,13 @@ async function handleSignalingMessage(raw) {
     cleanupPeer(msg.id);
     delete state.peerNames[msg.id];
     delete state.peerAuthed[msg.id];
+  } else if (msg.type === 'stats') {
+    setOnlineCount(msg.online);
   } else if (msg.type === 'join-error') {
     showError(els.callError, msg.error || 'Failed to join');
     toast(msg.error || 'Failed to join', 3500);
     disconnectAll();
+    startOnlinePolling();
     showScreen('home');
   }
 }
@@ -809,11 +862,13 @@ async function doConnect(room) {
       join.name = 'guest';
     }
     sendSignal(join);
+    stopOnlinePolling();
     showScreen('call');
   } catch (err) {
     console.error('[renderer] connect failed:', err);
     toast(err.message || 'Connect failed', 3500);
     disconnectAll();
+    startOnlinePolling();
   }
 }
 
@@ -843,6 +898,7 @@ function attachEvents() {
 
   els.btnLeave.addEventListener('click', () => {
     disconnectAll();
+    startOnlinePolling();
     showScreen('home');
     toast('Left room');
   });
@@ -936,6 +992,8 @@ async function init() {
   }
 
   loadMicList();
+  renderOnlineCount();
+  startOnlinePolling();
 }
 
 init();

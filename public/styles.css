@@ -269,6 +269,60 @@ textarea {
   color: var(--text-faint);
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.online-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.online-pill.is-stale {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-faint);
+}
+
+.online-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 var(--accent-ring);
+  animation: online-pulse 2s ease-out infinite;
+}
+
+.online-pill.is-stale .online-dot {
+  background: var(--text-faint);
+  animation: none;
+  box-shadow: none;
+}
+
+.online-count {
+  font-weight: 600;
+}
+
+.online-label {
+  color: var(--text-muted);
+}
+
+@keyframes online-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent-ring); }
+  70%  { box-shadow: 0 0 0 7px rgba(0, 217, 126, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 217, 126, 0); }
+}
+
 .content {
   flex: 1;
   overflow-y: auto;

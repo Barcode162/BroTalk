@@ -117,6 +117,10 @@ app.get('/ice-servers', (req, res) => {
   res.set('Cache-Control', 'public, max-age=300');
   res.json({ iceServers: buildIceServers() });
 });
+app.get('/stats', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ online: getOnlineCount() });
+});
 
 function requireDb(res) {
   if (!dbReady) {
@@ -210,6 +214,20 @@ function broadcastPeerList(roomCode) {
   }
 }
 
+function getOnlineCount() {
+  let count = 0;
+  for (const room of rooms.values()) count += room.size;
+  return count;
+}
+
+function broadcastStats() {
+  const online = getOnlineCount();
+  const payload = { type: 'stats', online };
+  for (const room of rooms.values()) {
+    for (const { socket } of room.values()) send(socket, payload);
+  }
+}
+
 wss.on('connection', (socket, req) => {
   let peerId = null;
   let roomCode = null;
@@ -250,6 +268,7 @@ wss.on('connection', (socket, req) => {
       rooms.get(roomCode).set(peerId, { socket, name, userId });
       send(socket, { type: 'welcome', id: peerId, room: roomCode, name });
       broadcastPeerList(roomCode);
+      broadcastStats();
       console.log(`[server] peer ${peerId.slice(0, 6)} joined "${roomCode}" as "${name}"${userId ? ' (authed)' : ' (guest)'} from ${remote} (room size: ${rooms.get(roomCode).size})`);
       return;
     }
@@ -278,6 +297,7 @@ wss.on('connection', (socket, req) => {
       }
       broadcastPeerList(roomCode);
     }
+    broadcastStats();
   });
 
   socket.on('error', (err) => {
