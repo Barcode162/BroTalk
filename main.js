@@ -11,10 +11,44 @@ const SIGNALING_URL = useLocalSignaling
   : 'wss://brotalk.onrender.com';
 
 let mainWindow = null;
-let updateReady = false;
+let splashWindow = null;
 let autoUpdaterRef = null;
+let updateDownloaded = false;
+let installingUpdate = false;
+let splashReady = false;
+let lastUpdateStatus = null;
 
-function createWindow() {
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 480,
+    height: 540,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#020403',
+    show: true,
+    skipTaskbar: false,
+    title: 'BroTalk',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-splash.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  splashWindow.setMenuBarVisibility(false);
+  splashWindow.loadFile(path.join(__dirname, 'public', 'splash.html'));
+
+  splashWindow.on('closed', () => {
+    splashWindow = null;
+  });
+}
+
+function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 720,
     height: 720,
@@ -22,6 +56,8 @@ function createWindow() {
     minHeight: 560,
     title: 'BroTalk',
     autoHideMenuBar: true,
+    show: false,
+    backgroundColor: '#0a0a0a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -56,11 +92,28 @@ function createWindow() {
   });
 }
 
+function showMainWindow() {
+  if (!mainWindow) createMainWindow();
+  const reveal = () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    if (splashWindow) {
+      try { splashWindow.close(); } catch {}
+    }
+  };
+  if (mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.once('did-finish-load', reveal);
+  } else {
+    reveal();
+  }
+}
+
 function restartApp() {
-  console.log('[main] restart requested (update ready:', updateReady, ')');
-  if (updateReady && autoUpdaterRef) {
+  if (updateDownloaded && autoUpdaterRef) {
     try {
-      autoUpdaterRef.quitAndInstall(false, true);
+      autoUpdaterRef.quitAndInstall(true, true);
       return;
     } catch (err) {
       console.error('[main] quitAndInstall failed:', err);
@@ -70,61 +123,98 @@ function restartApp() {
   app.quit();
 }
 
+function sendSplash(channel, payload) {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.webContents.send(channel, payload);
+  }
+}
+
+function pushUpdateStatus(status) {
+  lastUpdateStatus = { ...(lastUpdateStatus || {}), ...status };
+  if (splashReady) sendSplash('splash:update-status', lastUpdateStatus);
+}
+
 ipcMain.handle('get-config', () => ({
   signalingUrl: SIGNALING_URL,
   version: app.getVersion(),
 }));
 
+ipcMain.handle('splash:get-info', () => ({
+  version: app.getVersion(),
+}));
+
+ipcMain.on('splash:ready', () => {
+  splashReady = true;
+  if (lastUpdateStatus) sendSplash('splash:update-status', lastUpdateStatus);
+});
+
+ipcMain.on('splash:dismiss', () => {
+  showMainWindow();
+});
+
+ipcMain.on('splash:install-update', () => {
+  if (!updateDownloaded || !autoUpdaterRef) {
+    showMainWindow();
+    return;
+  }
+  installingUpdate = true;
+  try {
+    autoUpdaterRef.quitAndInstall(true, true);
+  } catch (err) {
+    console.error('[updater] quitAndInstall failed:', err);
+    showMainWindow();
+  }
+});
+
 function setupAutoUpdater() {
-  if (isDev) return;
+  if (isDev) {
+    pushUpdateStatus({ state: 'not-available' });
+    return;
+  }
   let autoUpdater;
   try {
     ({ autoUpdater } = require('electron-updater'));
   } catch (err) {
     console.warn('[updater] electron-updater not installed:', err.message);
+    pushUpdateStatus({ state: 'error', error: err.message });
     return;
   }
 
   autoUpdaterRef = autoUpdater;
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.disableDifferentialDownload = true;
 
   let downloadVersion = '';
 
   autoUpdater.on('error', (err) => {
     console.error('[updater] error:', err);
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'error', error: String(err && err.message || err) });
+    pushUpdateStatus({ state: 'error', error: String(err && err.message || err) });
   });
-  autoUpdater.on('checking-for-update', () => console.log('[updater] checking for updates…'));
+  autoUpdater.on('checking-for-update', () => {
+    pushUpdateStatus({ state: 'checking' });
+  });
   autoUpdater.on('update-available', (info) => {
-    console.log('[updater] update available:', info.version);
     downloadVersion = info.version;
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', version: info.version, percent: 0 });
+    pushUpdateStatus({ state: 'downloading', version: info.version, percent: 0 });
   });
-  autoUpdater.on('update-not-available', () => console.log('[updater] up to date'));
+  autoUpdater.on('update-not-available', () => {
+    pushUpdateStatus({ state: 'not-available' });
+  });
   autoUpdater.on('download-progress', (p) => {
-    console.log(`[updater] downloading: ${Math.round(p.percent)}%`);
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'downloading', percent: p.percent, version: downloadVersion });
+    pushUpdateStatus({ state: 'downloading', percent: p.percent, version: downloadVersion });
   });
   autoUpdater.on('update-downloaded', (info) => {
-    console.log('[updater] downloaded:', info.version, '— auto-installing in 3s');
-    updateReady = true;
-    if (mainWindow) mainWindow.webContents.send('update-status', { state: 'installing', version: info.version });
-    setTimeout(() => {
-      try {
-        autoUpdater.quitAndInstall(false, true);
-      } catch (err) {
-        console.error('[updater] auto-install failed:', err);
-        app.relaunch();
-        app.quit();
-      }
-    }, 3000);
+    updateDownloaded = true;
+    pushUpdateStatus({ state: 'downloaded', version: info.version });
   });
 
   setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) => console.error('[updater] check failed:', err));
-  }, 3000);
+    autoUpdater.checkForUpdates().catch((err) => {
+      console.error('[updater] check failed:', err);
+      pushUpdateStatus({ state: 'error', error: err.message });
+    });
+  }, 400);
 }
 
 app.whenReady().then(() => {
@@ -133,14 +223,19 @@ app.whenReady().then(() => {
     return callback(false);
   });
 
-  createWindow();
+  createSplashWindow();
+  createMainWindow();
   setupAutoUpdater();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createSplashWindow();
+      createMainWindow();
+    }
   });
 });
 
 app.on('window-all-closed', () => {
+  if (installingUpdate) return;
   if (process.platform !== 'darwin') app.quit();
 });

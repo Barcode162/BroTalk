@@ -1,7 +1,7 @@
 {
   "name": "brotalk",
   "productName": "BroTalk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Peer-to-peer voice chat for friends and family",
   "main": "main.js",
   "type": "commonjs",
@@ -32,6 +32,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "preload-splash.js",
       "public/**/*",
       "node_modules/**/*",
       "!server.js",
@@ -42,8 +43,9 @@
       "target": "nsis"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "BroTalk",

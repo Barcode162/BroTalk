@@ -978,19 +978,6 @@ async function init() {
     switchAuthTab('signin');
   }
 
-  if (hasApi && typeof window.api.onUpdateStatus === 'function') {
-    window.api.onUpdateStatus((data) => {
-      if (data.state === 'downloading') {
-        const pct = data.percent ? ` (${Math.round(data.percent)}%)` : '';
-        toast(`Downloading update v${data.version || ''}${pct}`);
-      } else if (data.state === 'installing') {
-        toast(`Update v${data.version} downloaded — restarting…`, 4000);
-      } else if (data.state === 'error') {
-        toast(`Update check failed: ${data.error}`, 4000);
-      }
-    });
-  }
-
   loadMicList();
   renderOnlineCount();
   startOnlinePolling();
