@@ -15,15 +15,17 @@ const TURN_URLS = (process.env.TURN_URLS || '')
   .filter(Boolean);
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  (process.env.NODE_ENV === 'production'
-    ? null
-    : 'dev-only-insecure-secret-change-me');
-
+let JWT_SECRET = process.env.JWT_SECRET || '';
 if (!JWT_SECRET) {
-  console.error('[server] FATAL: JWT_SECRET env var is required in production');
-  process.exit(1);
+  JWT_SECRET = crypto.randomBytes(48).toString('hex');
+  if (process.env.NODE_ENV === 'production') {
+    console.warn(
+      '[server] WARNING: JWT_SECRET env var not set in production — using an ephemeral secret. ' +
+      'Tokens will be invalidated whenever the server restarts. Set JWT_SECRET in Render to fix.'
+    );
+  } else {
+    console.warn('[server] JWT_SECRET not set — using ephemeral dev secret');
+  }
 }
 
 const TOKEN_TTL = '30d';
@@ -122,9 +124,38 @@ app.get('/stats', (req, res) => {
   res.json({ online: getOnlineCount() });
 });
 
+const PRESENCE_TTL_MS = 60_000;
+const presence = new Map();
+
+function prunePresence() {
+  const now = Date.now();
+  for (const [id, seen] of presence) {
+    if (now - seen > PRESENCE_TTL_MS) presence.delete(id);
+  }
+}
+
+setInterval(prunePresence, 30_000).unref();
+
+function getPresenceCount() {
+  prunePresence();
+  return presence.size;
+}
+
+app.post('/presence', (req, res) => {
+  const sessionId = String(req.body && req.body.sessionId || '').slice(0, 64);
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(sessionId)) {
+    return res.status(400).json({ error: 'Invalid sessionId' });
+  }
+  presence.set(sessionId, Date.now());
+  res.set('Cache-Control', 'no-store');
+  res.json({ online: getOnlineCount() });
+});
+
 function requireDb(res) {
   if (!dbReady) {
-    res.status(503).json({ error: 'Auth service unavailable (database not configured)' });
+    res.status(503).json({
+      error: 'Account service is offline (database not configured on the server yet). Try guest lobby for now.',
+    });
     return false;
   }
   return true;
@@ -215,9 +246,10 @@ function broadcastPeerList(roomCode) {
 }
 
 function getOnlineCount() {
-  let count = 0;
-  for (const room of rooms.values()) count += room.size;
-  return count;
+  prunePresence();
+  let inRooms = 0;
+  for (const room of rooms.values()) inRooms += room.size;
+  return Math.max(inRooms, presence.size);
 }
 
 function broadcastStats() {

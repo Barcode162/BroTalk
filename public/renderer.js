@@ -4,7 +4,22 @@
 
 const LS_TOKEN = 'brotalk.token';
 const LS_RECENT = 'brotalk.recentRooms';
+const LS_SESSION = 'brotalk.sessionId';
 const MAX_RECENT = 8;
+const PRESENCE_PING_MS = 30000;
+
+function getOrCreateSessionId() {
+  try {
+    let id = localStorage.getItem(LS_SESSION);
+    if (!id || !/^[a-zA-Z0-9_-]{8,64}$/.test(id)) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
+      localStorage.setItem(LS_SESSION, id);
+    }
+    return id;
+  } catch {
+    return 'guest-' + Math.random().toString(36).slice(2, 12);
+  }
+}
 
 const state = {
   auth: null,                      // { token, user: { id, username } } | null
@@ -35,6 +50,7 @@ const state = {
   recentRooms: [],
   onlineCount: null,
   onlinePollTimer: 0,
+  sessionId: '',
 };
 
 const ONLINE_POLL_MS = 15000;
@@ -127,7 +143,31 @@ function setOnlineCount(n) {
   renderOnlineCount();
 }
 
-async function fetchOnlineCount() {
+async function pingPresence() {
+  if (!state.httpBaseUrl || !state.sessionId) return;
+  try {
+    const res = await fetch(state.httpBaseUrl + '/presence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: state.sessionId }),
+      cache: 'no-store',
+      keepalive: true,
+    });
+    if (!res.ok) {
+      if (res.status === 404) {
+        return fetchOnlineCountFallback();
+      }
+      throw new Error('HTTP ' + res.status);
+    }
+    const data = await res.json();
+    setOnlineCount(data.online);
+  } catch (err) {
+    console.warn('[renderer] pingPresence failed:', err.message);
+    fetchOnlineCountFallback();
+  }
+}
+
+async function fetchOnlineCountFallback() {
   if (!state.httpBaseUrl) return;
   try {
     const res = await fetch(state.httpBaseUrl + '/stats', { cache: 'no-store' });
@@ -135,15 +175,15 @@ async function fetchOnlineCount() {
     const data = await res.json();
     setOnlineCount(data.online);
   } catch (err) {
-    console.warn('[renderer] fetchOnlineCount failed:', err.message);
+    console.warn('[renderer] /stats fallback failed:', err.message);
   }
 }
 
 function startOnlinePolling() {
   stopOnlinePolling();
   if (!state.httpBaseUrl) return;
-  fetchOnlineCount();
-  state.onlinePollTimer = setInterval(fetchOnlineCount, ONLINE_POLL_MS);
+  pingPresence();
+  state.onlinePollTimer = setInterval(pingPresence, PRESENCE_PING_MS);
 }
 
 function stopOnlinePolling() {
@@ -402,9 +442,29 @@ async function handleSignup(ev) {
 
 function buildAudioConstraints(deviceId) {
   const audio = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    voiceIsolation: false,
+    googEchoCancellation: false,
+    googAutoGainControl: false,
+    googNoiseSuppression: false,
+    googHighpassFilter: false,
+    googTypingNoiseDetection: false,
+    googAudioMirroring: false,
+    googNoiseReduction: false,
+    googNoiseSuppression2: false,
+    googEchoCancellation2: false,
+    googAutoGainControl2: false,
+    googDAEchoCancellation: false,
+    googExperimentalEchoCancellation: false,
+    googExperimentalNoiseSuppression: false,
+    googExperimentalAutoGainControl: false,
+    googBeamforming: false,
+    channelCount: 1,
+    sampleRate: 48000,
+    sampleSize: 16,
+    latency: 0,
   };
   if (deviceId) audio.deviceId = { exact: deviceId };
   return { audio, video: false };
@@ -535,6 +595,46 @@ function stopMicMeter() {
   if (els.micFill) els.micFill.style.width = '0%';
 }
 
+/* ── Audio quality helpers ──────────────────────── */
+
+const OPUS_MAX_BITRATE = 510000;
+
+function enhanceOpusSdp(sdp) {
+  if (!sdp) return sdp;
+  const rtpmap = sdp.match(/a=rtpmap:(\d+)\s+opus\/\d+(?:\/\d+)?/i);
+  if (!rtpmap) return sdp;
+  const pt = rtpmap[1];
+  const fmtp = `a=fmtp:${pt} minptime=10;useinbandfec=1;usedtx=0;cbr=1;stereo=0;sprop-stereo=0;maxaveragebitrate=${OPUS_MAX_BITRATE};maxplaybackrate=48000;sprop-maxcapturerate=48000`;
+  const fmtpRe = new RegExp(`a=fmtp:${pt}[^\\r\\n]*`);
+  let out;
+  if (fmtpRe.test(sdp)) {
+    out = sdp.replace(fmtpRe, fmtp);
+  } else {
+    out = sdp.replace(rtpmap[0], rtpmap[0] + '\r\n' + fmtp);
+  }
+  return out;
+}
+
+async function applyHighQualityAudio(pc) {
+  const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+  if (!sender || !sender.getParameters) return;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+    params.encodings[0].maxBitrate = OPUS_MAX_BITRATE;
+    params.encodings[0].priority = 'high';
+    params.encodings[0].networkPriority = 'high';
+    if ('adaptivePtime' in params.encodings[0]) {
+      params.encodings[0].adaptivePtime = false;
+    }
+    await sender.setParameters(params);
+  } catch (err) {
+    console.warn('[renderer] setParameters high-quality failed:', err.message);
+  }
+}
+
 /* ── WebRTC / signaling ──────────────────────────── */
 
 function sendSignal(msg) {
@@ -587,7 +687,9 @@ function createPeerConnection(peerId, isInitiator) {
     (async () => {
       try {
         const offer = await pc.createOffer();
+        offer.sdp = enhanceOpusSdp(offer.sdp);
         await pc.setLocalDescription(offer);
+        await applyHighQualityAudio(pc);
         sendSignal({ type: 'offer', to: peerId, sdp: pc.localDescription });
       } catch (err) {
         console.error('[renderer] createOffer failed:', err);
@@ -688,7 +790,9 @@ async function handleSignalingMessage(raw) {
       await pc.setRemoteDescription(msg.sdp);
       await flushPendingIce(pc);
       const answer = await pc.createAnswer();
+      answer.sdp = enhanceOpusSdp(answer.sdp);
       await pc.setLocalDescription(answer);
+      await applyHighQualityAudio(pc);
       sendSignal({ type: 'answer', to: msg.from, sdp: pc.localDescription });
     } catch (err) {
       console.error('[renderer] handle offer failed:', err);
@@ -862,7 +966,6 @@ async function doConnect(room) {
       join.name = 'guest';
     }
     sendSignal(join);
-    stopOnlinePolling();
     showScreen('call');
   } catch (err) {
     console.error('[renderer] connect failed:', err);
@@ -949,6 +1052,7 @@ async function init() {
   loadRecent();
   renderRecent();
   renderProfileChip();
+  state.sessionId = getOrCreateSessionId();
 
   const hasApi = typeof window.api === 'object' && window.api !== null;
   if (hasApi && typeof window.api.getConfig === 'function') {
