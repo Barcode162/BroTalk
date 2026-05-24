@@ -461,7 +461,7 @@ function buildAudioConstraints(deviceId) {
     googExperimentalNoiseSuppression: false,
     googExperimentalAutoGainControl: false,
     googBeamforming: false,
-    channelCount: 1,
+    channelCount: { ideal: 2 },
     sampleRate: 48000,
     sampleSize: 16,
     latency: 0,
@@ -604,7 +604,7 @@ function enhanceOpusSdp(sdp) {
   const rtpmap = sdp.match(/a=rtpmap:(\d+)\s+opus\/\d+(?:\/\d+)?/i);
   if (!rtpmap) return sdp;
   const pt = rtpmap[1];
-  const fmtp = `a=fmtp:${pt} minptime=10;useinbandfec=1;usedtx=0;cbr=1;stereo=0;sprop-stereo=0;maxaveragebitrate=${OPUS_MAX_BITRATE};maxplaybackrate=48000;sprop-maxcapturerate=48000`;
+  const fmtp = `a=fmtp:${pt} minptime=10;useinbandfec=1;usedtx=0;cbr=1;stereo=1;sprop-stereo=1;maxaveragebitrate=${OPUS_MAX_BITRATE};maxplaybackrate=48000;sprop-maxcapturerate=48000`;
   const fmtpRe = new RegExp(`a=fmtp:${pt}[^\\r\\n]*`);
   let out;
   if (fmtpRe.test(sdp)) {
