@@ -11,53 +11,21 @@ const SIGNALING_URL = useLocalSignaling
   : 'wss://brotalk.onrender.com';
 
 let mainWindow = null;
-let splashWindow = null;
 let autoUpdaterRef = null;
 let updateDownloaded = false;
 let installingUpdate = false;
-let splashReady = false;
-let lastUpdateStatus = null;
-
-function createSplashWindow() {
-  splashWindow = new BrowserWindow({
-    width: 480,
-    height: 540,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    frame: false,
-    transparent: false,
-    backgroundColor: '#020403',
-    show: true,
-    skipTaskbar: false,
-    title: 'BroTalk',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload-splash.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-
-  splashWindow.setMenuBarVisibility(false);
-  splashWindow.loadFile(path.join(__dirname, 'public', 'splash.html'));
-
-  splashWindow.on('closed', () => {
-    splashWindow = null;
-  });
-}
+let lastUpdateStatus = { state: 'idle' };
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 720,
-    height: 720,
-    minWidth: 480,
-    minHeight: 560,
+    width: 880,
+    height: 760,
+    minWidth: 520,
+    minHeight: 600,
     title: 'BroTalk',
     autoHideMenuBar: true,
-    show: false,
-    backgroundColor: '#0a0a0a',
+    show: true,
+    backgroundColor: '#1a1718',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -92,24 +60,6 @@ function createMainWindow() {
   });
 }
 
-function showMainWindow() {
-  if (!mainWindow) createMainWindow();
-  const reveal = () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-    if (splashWindow) {
-      try { splashWindow.close(); } catch {}
-    }
-  };
-  if (mainWindow.webContents.isLoading()) {
-    mainWindow.webContents.once('did-finish-load', reveal);
-  } else {
-    reveal();
-  }
-}
-
 function restartApp() {
   if (updateDownloaded && autoUpdaterRef) {
     try {
@@ -123,15 +73,15 @@ function restartApp() {
   app.quit();
 }
 
-function sendSplash(channel, payload) {
-  if (splashWindow && !splashWindow.isDestroyed()) {
-    splashWindow.webContents.send(channel, payload);
+function sendUpdate(status) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update:status', status);
   }
 }
 
 function pushUpdateStatus(status) {
   lastUpdateStatus = { ...(lastUpdateStatus || {}), ...status };
-  if (splashReady) sendSplash('splash:update-status', lastUpdateStatus);
+  sendUpdate(lastUpdateStatus);
 }
 
 ipcMain.handle('get-config', () => ({
@@ -139,30 +89,16 @@ ipcMain.handle('get-config', () => ({
   version: app.getVersion(),
 }));
 
-ipcMain.handle('splash:get-info', () => ({
-  version: app.getVersion(),
-}));
+ipcMain.handle('update:get-status', () => lastUpdateStatus);
 
-ipcMain.on('splash:ready', () => {
-  splashReady = true;
-  if (lastUpdateStatus) sendSplash('splash:update-status', lastUpdateStatus);
-});
-
-ipcMain.on('splash:dismiss', () => {
-  showMainWindow();
-});
-
-ipcMain.on('splash:install-update', () => {
-  if (!updateDownloaded || !autoUpdaterRef) {
-    showMainWindow();
-    return;
-  }
+ipcMain.on('update:install', () => {
+  if (!updateDownloaded || !autoUpdaterRef) return;
   installingUpdate = true;
   try {
     autoUpdaterRef.quitAndInstall(true, true);
   } catch (err) {
     console.error('[updater] quitAndInstall failed:', err);
-    showMainWindow();
+    installingUpdate = false;
   }
 });
 
@@ -223,13 +159,11 @@ app.whenReady().then(() => {
     return callback(false);
   });
 
-  createSplashWindow();
   createMainWindow();
   setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createSplashWindow();
       createMainWindow();
     }
   });

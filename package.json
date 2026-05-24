@@ -1,7 +1,7 @@
 {
   "name": "brotalk",
   "productName": "BroTalk",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Peer-to-peer voice chat for friends and family",
   "main": "main.js",
   "type": "commonjs",
@@ -32,8 +32,11 @@
     "files": [
       "main.js",
       "preload.js",
-      "preload-splash.js",
       "public/**/*",
+      "!public/splash.html",
+      "!public/splash.css",
+      "!public/splash.js",
+      "!public/brotalk-annotated.css",
       "node_modules/**/*",
       "!server.js",
       "!render.yaml",

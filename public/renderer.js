@@ -1,12 +1,25 @@
 /* ============================================================
- * BroTalk renderer
+ * BroTalk renderer — v0.2.6 Ashy Smoke
  * ============================================================ */
 
-const LS_TOKEN = 'brotalk.token';
-const LS_RECENT = 'brotalk.recentRooms';
+const LS_TOKEN   = 'brotalk.token';
+const LS_RECENT  = 'brotalk.recentRooms';
 const LS_SESSION = 'brotalk.sessionId';
+const LS_THEME   = 'brotalk.theme';
 const MAX_RECENT = 8;
 const PRESENCE_PING_MS = 30000;
+const MIN_LOADING_MS   = 1200;
+const MAX_LOADING_MS   = 3500;
+const ALLOWED_THEMES   = ['ashy', 'green'];
+const DEFAULT_THEME    = 'ashy';
+
+const EE_LINES = [
+  "a line meant only for the ones who notice.",
+  "every voice here travels peer-to-peer — no server listens.",
+  "the dot is white. the rest is warm. that's the deal.",
+  "you and your people. nothing else in the room.",
+  "stay a while.",
+];
 
 function getOrCreateSessionId() {
   try {
@@ -22,7 +35,7 @@ function getOrCreateSessionId() {
 }
 
 const state = {
-  auth: null,                      // { token, user: { id, username } } | null
+  auth: null,
   signaling: null,
   signalingUrl: '',
   httpBaseUrl: '',
@@ -35,8 +48,7 @@ const state = {
   myPeerId: null,
   myName: '',
   myRoom: '',
-  pendingRoom: '',
-  pendingMode: 'auth',             // 'auth' | 'lobby' | 'named'
+  pendingMode: 'auth',
   isMuted: false,
   masterVolume: 1.0,
   selectedDeviceId: '',
@@ -46,11 +58,17 @@ const state = {
   analyserData: null,
   meterRaf: 0,
   iceServers: null,
-  currentScreen: 'auth',
+  currentScreen: 'loading',
   recentRooms: [],
   onlineCount: null,
   onlinePollTimer: 0,
   sessionId: '',
+  theme: DEFAULT_THEME,
+  loadingStart: 0,
+  updateStatus: { state: 'idle' },
+  loadingReady: false,
+  drawerOpen: false,
+  eeLineIdx: 0,
 };
 
 const ONLINE_POLL_MS = 15000;
@@ -71,42 +89,34 @@ function buildRtcConfig() {
 const els = {};
 function bindEls() {
   const ids = [
-    'screen-auth', 'screen-home', 'screen-call', 'screen-profile',
-    'tab-signin', 'tab-signup',
-    'form-signin', 'form-signup',
-    'signin-username', 'signin-password', 'signin-error',
-    'signup-username', 'signup-password', 'signup-error',
-    'btn-guest',
-    'btn-new-room', 'btn-join-lobby',
-    'form-join-room', 'room-input', 'room-form-error',
-    'hero-subtitle', 'named-room-desc',
-    'mic-select', 'call-mic-select', 'btn-refresh-mics',
-    'topbar-title', 'topbar-meta',
-    'profile-avatar', 'profile-name', 'profile-sub',
-    'profile-avatar-lg', 'profile-display-name', 'profile-sub-lg', 'profile-details',
-    'btn-profile', 'btn-back-home', 'btn-logout',
-    'recent-rooms',
-    'room-display', 'btn-copy-room', 'btn-leave',
+    'screen-loading', 'screen-welcome', 'screen-call', 'screen-settings', 'screen-profile', 'screen-auth',
+    'loading-line', 'btn-install-update', 'install-update-label', 'btn-enter', 'enter-label',
+    'btn-open-menu-corner', 'btn-settings', 'btn-profile', 'profile-avatar',
+    'welcome-line', 'btn-start', 'online-status', 'online-count',
+    'btn-leave', 'room-display', 'btn-copy-room',
     'self-avatar', 'self-name', 'self-role', 'mic-fill',
-    'btn-mute', 'volume-slider',
-    'peers-list', 'call-error', 'remote-audios',
-    'toast',
-    'online-pill', 'online-count',
+    'btn-mute', 'volume-slider', 'call-mic-select', 'call-error',
+    'btn-back-from-settings', 'mic-select', 'btn-refresh-mics', 'about-details',
+    'btn-back-from-profile', 'profile-avatar-lg', 'profile-display-name', 'profile-sub-lg', 'profile-details', 'btn-logout',
+    'btn-back-from-auth', 'tab-signin', 'tab-signup', 'form-signin', 'form-signup',
+    'signin-username', 'signin-password', 'signin-error',
+    'signup-username', 'signup-password', 'signup-error', 'btn-guest',
+    'drawer', 'drawer-close', 'drawer-scrim',
+    'btn-join-lobby', 'form-join-room', 'room-input', 'room-form-error', 'named-room-desc',
+    'recent-rooms', 'btn-drawer-profile', 'drawer-avatar', 'drawer-profile-name', 'drawer-profile-sub',
+    'btn-drawer-settings',
+    'ee-dot', 'ee-panel', 'ee-poem',
+    'peers-list', 'remote-audios', 'toast',
   ];
   for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
 
-function camel(s) {
-  return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-}
+function camel(s) { return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase()); }
 
 function escapeHtml(s) {
   return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function initialOf(name) {
@@ -124,16 +134,53 @@ function toast(msg, ms = 2400) {
   toastTimer = setTimeout(() => els.toast.classList.add('hidden'), ms);
 }
 
+/* ── Theme ───────────────────────────────────────── */
+
+function loadTheme() {
+  try {
+    const stored = localStorage.getItem(LS_THEME);
+    if (stored && ALLOWED_THEMES.includes(stored)) return stored;
+  } catch {}
+  return DEFAULT_THEME;
+}
+
+function applyTheme(theme) {
+  if (!ALLOWED_THEMES.includes(theme)) theme = DEFAULT_THEME;
+  state.theme = theme;
+  document.body.classList.remove('theme-ashy', 'theme-green');
+  document.body.classList.add('theme-' + theme);
+  try { localStorage.setItem(LS_THEME, theme); } catch {}
+  for (const node of document.querySelectorAll('.theme-swatch')) {
+    const active = node.dataset.theme === theme;
+    node.classList.toggle('is-active', active);
+    const input = node.querySelector('input[type="radio"]');
+    if (input) input.checked = active;
+  }
+}
+
+/* ── Screen routing ──────────────────────────────── */
+
+function showScreen(name) {
+  state.currentScreen = name;
+  document.body.dataset.screen = name;
+  for (const key of ['Loading', 'Welcome', 'Call', 'Settings', 'Profile', 'Auth']) {
+    const el = els['screen' + key];
+    if (!el) continue;
+    el.dataset.active = (key.toLowerCase() === name) ? 'true' : 'false';
+  }
+  if (name !== 'welcome' && name !== 'loading') closeDrawer();
+}
+
 /* ── Online counter ──────────────────────────────── */
 
 function renderOnlineCount() {
-  if (!els.onlinePill) return;
+  if (!els.onlineCount) return;
   if (state.onlineCount === null) {
     els.onlineCount.textContent = '—';
-    els.onlinePill.classList.add('is-stale');
+    els.onlineStatus.classList.add('is-stale');
   } else {
     els.onlineCount.textContent = String(state.onlineCount);
-    els.onlinePill.classList.remove('is-stale');
+    els.onlineStatus.classList.remove('is-stale');
   }
 }
 
@@ -154,9 +201,7 @@ async function pingPresence() {
       keepalive: true,
     });
     if (!res.ok) {
-      if (res.status === 404) {
-        return fetchOnlineCountFallback();
-      }
+      if (res.status === 404) return fetchOnlineCountFallback();
       throw new Error('HTTP ' + res.status);
     }
     const data = await res.json();
@@ -193,53 +238,107 @@ function stopOnlinePolling() {
   }
 }
 
-/* ── Screen routing ──────────────────────────────── */
+/* ── Loading screen ──────────────────────────────── */
 
-function showScreen(name) {
-  state.currentScreen = name;
-  for (const k of ['screenAuth', 'screenHome', 'screenCall', 'screenProfile']) {
-    els[k].classList.toggle('hidden', k !== 'screen' + name.charAt(0).toUpperCase() + name.slice(1));
+function setLoadingLine(text) {
+  els.loadingLine.textContent = text;
+}
+
+function applyUpdateStatus(status) {
+  if (!status) return;
+  state.updateStatus = { ...state.updateStatus, ...status };
+  const s = state.updateStatus.state;
+  if (s === 'checking') {
+    setLoadingLine('looking for updates…');
+  } else if (s === 'downloading') {
+    const v = state.updateStatus.version || '';
+    const pct = state.updateStatus.percent ? ` · ${Math.round(state.updateStatus.percent)}%` : '';
+    setLoadingLine(`downloading v${v}${pct}`);
+    els.btnInstallUpdate.classList.add('hidden');
+    els.btnEnter.disabled = true;
+    els.enterLabel.textContent = 'loading…';
+  } else if (s === 'downloaded') {
+    const v = state.updateStatus.version || '';
+    setLoadingLine('update ready when you are.');
+    els.installUpdateLabel.textContent = `Install v${v}`;
+    els.btnInstallUpdate.classList.remove('hidden');
+    enableEnter('Continue without updating');
+  } else if (s === 'not-available') {
+    setLoadingLine(`you're on the latest · v${state.appVersion || '—'}`);
+    enableEnter('Enter BroTalk');
+  } else if (s === 'error') {
+    setLoadingLine('update check skipped.');
+    enableEnter('Enter BroTalk');
   }
-  const titles = {
-    auth: 'Welcome',
-    home: 'Home',
-    call: `Room · ${state.myRoom || ''}`,
-    profile: 'Profile',
-  };
-  els.topbarTitle.textContent = titles[name] || 'BroTalk';
-  updateTopbarMeta();
 }
 
-function updateTopbarMeta() {
-  const v = state.appVersion ? `v${state.appVersion}` : '';
-  const acct = state.auth ? `· @${state.auth.user.username}` : '· guest';
-  els.topbarMeta.textContent = `${v} ${acct}`.trim();
+function enableEnter(label) {
+  const since = performance.now() - state.loadingStart;
+  const wait = Math.max(0, MIN_LOADING_MS - since);
+  setTimeout(() => {
+    state.loadingReady = true;
+    els.btnEnter.disabled = false;
+    els.enterLabel.textContent = label || 'Enter BroTalk';
+  }, wait);
 }
 
-/* ── Error helpers ───────────────────────────────── */
-
-function showError(el, msg) {
-  el.textContent = msg;
-  el.classList.remove('hidden');
+function startLoadingWatchdog() {
+  setTimeout(() => {
+    if (state.loadingReady) return;
+    const s = state.updateStatus.state;
+    if (s === 'downloading' || s === 'downloaded') return;
+    enableEnter('Enter BroTalk');
+  }, MAX_LOADING_MS);
 }
-function clearError(el) {
-  el.textContent = '';
-  el.classList.add('hidden');
+
+function leaveLoading() {
+  if (!state.loadingReady) return;
+  showScreen('welcome');
+}
+
+/* ── Drawer ──────────────────────────────────────── */
+
+function openDrawer() {
+  state.drawerOpen = true;
+  els.drawer.dataset.open = 'true';
+  els.drawerScrim.dataset.open = 'true';
+}
+function closeDrawer() {
+  state.drawerOpen = false;
+  els.drawer.dataset.open = 'false';
+  els.drawerScrim.dataset.open = 'false';
+}
+function toggleDrawer() {
+  if (state.drawerOpen) closeDrawer(); else openDrawer();
+}
+
+/* ── Easter-egg ──────────────────────────────────── */
+
+function pickEeLine() {
+  state.eeLineIdx = (state.eeLineIdx + 1) % EE_LINES.length;
+  els.eePoem.textContent = EE_LINES[state.eeLineIdx];
+}
+function toggleEe() {
+  const open = els.eePanel.dataset.open === 'true';
+  if (open) {
+    els.eePanel.dataset.open = 'false';
+  } else {
+    pickEeLine();
+    els.eePanel.dataset.open = 'true';
+  }
 }
 
 /* ── Profile UI ──────────────────────────────────── */
 
 function renderProfileChip() {
-  if (state.auth) {
-    const u = state.auth.user.username;
-    els.profileAvatar.textContent = initialOf(u);
-    els.profileName.textContent = u;
-    els.profileSub.textContent = 'View profile';
-  } else {
-    els.profileAvatar.textContent = '?';
-    els.profileName.textContent = 'Sign in';
-    els.profileSub.textContent = 'Guest';
-  }
+  const u = state.auth ? state.auth.user.username : null;
+  const initial = u ? initialOf(u) : '?';
+  const name = u ? u : 'Sign in';
+  const sub = u ? 'view profile' : 'guest';
+  if (els.profileAvatar) els.profileAvatar.textContent = initial;
+  if (els.drawerAvatar) els.drawerAvatar.textContent = initial;
+  if (els.drawerProfileName) els.drawerProfileName.textContent = name;
+  if (els.drawerProfileSub) els.drawerProfileSub.textContent = sub;
 }
 
 function renderProfileScreen() {
@@ -250,12 +349,33 @@ function renderProfileScreen() {
   const u = state.auth.user;
   els.profileAvatarLg.textContent = initialOf(u.username);
   els.profileDisplayName.textContent = u.username;
-  els.profileSubLg.textContent = 'Signed in';
+  els.profileSubLg.textContent = 'signed in';
   els.profileDetails.innerHTML = `
-    <dt>Username</dt><dd>${escapeHtml(u.username)}</dd>
-    <dt>User ID</dt><dd>${escapeHtml(u.id)}</dd>
-    <dt>Session</dt><dd>active</dd>
+    <dt>username</dt><dd>${escapeHtml(u.username)}</dd>
+    <dt>user id</dt><dd>${escapeHtml(u.id)}</dd>
+    <dt>session</dt><dd>active</dd>
   `;
+}
+
+function renderAboutDetails() {
+  if (!els.aboutDetails) return;
+  els.aboutDetails.innerHTML = `
+    <dt>version</dt><dd>v${escapeHtml(state.appVersion || '—')}</dd>
+    <dt>signaling</dt><dd>${escapeHtml(state.signalingUrl ? new URL(state.signalingUrl.replace(/^ws/, 'http')).host : '—')}</dd>
+    <dt>session</dt><dd>${escapeHtml(state.sessionId.slice(0, 8))}…</dd>
+  `;
+}
+
+function renderHomeAuthHint() {
+  if (state.auth) {
+    if (els.welcomeLine) els.welcomeLine.textContent = `welcome back, ${state.auth.user.username}.`;
+    if (els.namedRoomDesc) els.namedRoomDesc.textContent = 'private room — pick a code, share it';
+    if (els.roomInput) els.roomInput.disabled = false;
+  } else {
+    if (els.welcomeLine) els.welcomeLine.textContent = 'ready when you are.';
+    if (els.namedRoomDesc) els.namedRoomDesc.textContent = 'sign in to use private rooms';
+    if (els.roomInput) els.roomInput.disabled = true;
+  }
 }
 
 /* ── Recent rooms ────────────────────────────────── */
@@ -285,7 +405,7 @@ function renderRecent() {
   for (const r of state.recentRooms) {
     const li = document.createElement('li');
     li.dataset.room = r;
-    li.innerHTML = `<span class="recent-dot"></span><span>${escapeHtml(r)}</span>`;
+    li.innerHTML = `<span class="dot"></span><span>${escapeHtml(r)}</span>`;
     li.addEventListener('click', () => requestJoinRoom(r));
     els.recentRooms.appendChild(li);
   }
@@ -311,8 +431,7 @@ function setAuth(auth) {
     try { localStorage.removeItem(LS_TOKEN); } catch {}
   }
   renderProfileChip();
-  updateTopbarMeta();
-  updateHomeForAuth();
+  renderHomeAuthHint();
 }
 
 async function apiSignup(username, password) {
@@ -358,22 +477,6 @@ async function restoreSession() {
   }
 }
 
-/* ── Home UI ─────────────────────────────────────── */
-
-function updateHomeForAuth() {
-  if (state.auth) {
-    els.heroSubtitle.textContent = `Welcome back, ${state.auth.user.username}.`;
-    els.namedRoomDesc.textContent = 'Pick a code, share it with friends.';
-    els.roomInput.disabled = false;
-  } else {
-    els.heroSubtitle.textContent = 'Hop into the public lobby — or sign in to use named rooms.';
-    els.namedRoomDesc.textContent = 'Sign in to create or join a named room.';
-    els.roomInput.disabled = true;
-  }
-}
-
-/* ── Auth screen behaviors ───────────────────────── */
-
 function switchAuthTab(which) {
   const isSignin = which === 'signin';
   els.tabSignin.classList.toggle('active', isSignin);
@@ -402,7 +505,7 @@ async function handleSignin(ev) {
     setAuth({ token: data.token, user: data.user });
     toast(`Signed in as ${data.user.username}`);
     els.signinPassword.value = '';
-    showScreen('home');
+    showScreen('welcome');
   } catch (err) {
     showError(els.signinError, err.message || 'Sign-in failed.');
   } finally {
@@ -430,12 +533,23 @@ async function handleSignup(ev) {
     setAuth({ token: data.token, user: data.user });
     toast(`Welcome, ${data.user.username}!`);
     els.signupPassword.value = '';
-    showScreen('home');
+    showScreen('welcome');
   } catch (err) {
     showError(els.signupError, err.message || 'Signup failed.');
   } finally {
     btn.disabled = false;
   }
+}
+
+/* ── Error helpers ───────────────────────────────── */
+
+function showError(el, msg) {
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+function clearError(el) {
+  el.textContent = '';
+  el.classList.add('hidden');
 }
 
 /* ── Mic handling ────────────────────────────────── */
@@ -657,9 +771,7 @@ function createPeerConnection(peerId, isInitiator) {
   }
 
   pc.onicecandidate = (ev) => {
-    if (ev.candidate) {
-      sendSignal({ type: 'ice', to: peerId, candidate: ev.candidate });
-    }
+    if (ev.candidate) sendSignal({ type: 'ice', to: peerId, candidate: ev.candidate });
   };
 
   pc.ontrack = (ev) => {
@@ -741,7 +853,7 @@ function renderPeersList() {
     li.innerHTML = `
       <span class="peer-avatar">${escapeHtml(initialOf(name))}</span>
       <div class="peer-main">
-        <span class="peer-name">${escapeHtml(name)}${authed ? '<span class="peer-badge" style="margin-left:6px">verified</span>' : ''}</span>
+        <span class="peer-name">${escapeHtml(name)}${authed ? '<span class="peer-badge">verified</span>' : ''}</span>
         <span class="peer-meta">${id.slice(0, 6)}</span>
       </div>
       <span class="peer-state"><span class="peer-state-dot ${dotClass}"></span>${escapeHtml(connState)}</span>
@@ -761,8 +873,7 @@ async function handleSignalingMessage(raw) {
     els.roomDisplay.textContent = msg.room;
     els.selfName.textContent = state.myName || msg.id.slice(0, 8);
     els.selfAvatar.textContent = initialOf(state.myName);
-    els.selfRole.textContent = state.auth ? 'You · signed in' : 'You · guest';
-    els.topbarTitle.textContent = `Room · ${msg.room}`;
+    els.selfRole.textContent = state.auth ? 'you · signed in' : 'you · guest';
     pushRecent(msg.room);
   } else if (msg.type === 'peers') {
     const incomingIds = msg.peers.map((p) => p.id);
@@ -828,7 +939,7 @@ async function handleSignalingMessage(raw) {
     toast(msg.error || 'Failed to join', 3500);
     disconnectAll();
     startOnlinePolling();
-    showScreen('home');
+    showScreen('welcome');
   }
 }
 
@@ -860,9 +971,7 @@ function connectSignaling(url) {
         reject(new Error('Failed to reach signaling server'));
       }
     };
-    ws.onclose = () => {
-      // No-op; state.signaling becomes invalid until reconnect
-    };
+    ws.onclose = () => {};
     ws.onmessage = (ev) => handleSignalingMessage(ev.data);
   });
 }
@@ -888,7 +997,7 @@ function disconnectAll() {
 }
 
 function setMuteButton(muted) {
-  els.btnMute.querySelector('.control-label').textContent = muted ? 'Unmute' : 'Mute';
+  els.btnMute.querySelector('.btn-label').textContent = muted ? 'Unmute' : 'Mute';
   els.btnMute.setAttribute('aria-pressed', String(muted));
 }
 
@@ -952,6 +1061,7 @@ async function doConnect(room) {
     toast('No signaling URL configured.', 3500);
     return;
   }
+  closeDrawer();
   toast('Connecting…');
 
   try {
@@ -978,22 +1088,62 @@ async function doConnect(room) {
 /* ── Wiring ──────────────────────────────────────── */
 
 function attachEvents() {
+  els.btnEnter.addEventListener('click', leaveLoading);
+  els.btnInstallUpdate.addEventListener('click', () => {
+    if (window.api && window.api.installUpdate) {
+      els.btnInstallUpdate.disabled = true;
+      els.btnEnter.disabled = true;
+      setLoadingLine('installing update…');
+      window.api.installUpdate();
+    }
+  });
+
+  els.btnStart.addEventListener('click', openDrawer);
+  els.btnOpenMenuCorner.addEventListener('click', toggleDrawer);
+  els.drawerClose.addEventListener('click', closeDrawer);
+  els.drawerScrim.addEventListener('click', closeDrawer);
+
+  els.btnSettings.addEventListener('click', () => showScreen('settings'));
+  els.btnDrawerSettings.addEventListener('click', () => showScreen('settings'));
+  els.btnProfile.addEventListener('click', () => {
+    if (state.auth) {
+      renderProfileScreen();
+      showScreen('profile');
+    } else {
+      showScreen('auth');
+      switchAuthTab('signin');
+    }
+  });
+  els.btnDrawerProfile.addEventListener('click', () => {
+    if (state.auth) {
+      renderProfileScreen();
+      showScreen('profile');
+    } else {
+      showScreen('auth');
+      switchAuthTab('signin');
+    }
+  });
+
+  els.btnBackFromSettings.addEventListener('click', () => showScreen('welcome'));
+  els.btnBackFromProfile.addEventListener('click', () => showScreen('welcome'));
+  els.btnBackFromAuth.addEventListener('click', () => showScreen('welcome'));
+
+  els.btnLogout.addEventListener('click', () => {
+    setAuth(null);
+    toast('Signed out');
+    showScreen('welcome');
+  });
+
   els.tabSignin.addEventListener('click', () => switchAuthTab('signin'));
   els.tabSignup.addEventListener('click', () => switchAuthTab('signup'));
   els.formSignin.addEventListener('submit', handleSignin);
   els.formSignup.addEventListener('submit', handleSignup);
   els.btnGuest.addEventListener('click', () => {
     setAuth(null);
-    showScreen('home');
-  });
-
-  els.btnNewRoom.addEventListener('click', () => {
-    if (state.currentScreen !== 'home') showScreen('home');
-    els.roomInput.focus();
+    showScreen('welcome');
   });
 
   els.btnJoinLobby.addEventListener('click', joinLobby);
-
   els.formJoinRoom.addEventListener('submit', (ev) => {
     ev.preventDefault();
     requestJoinRoom(els.roomInput.value);
@@ -1002,7 +1152,7 @@ function attachEvents() {
   els.btnLeave.addEventListener('click', () => {
     disconnectAll();
     startOnlinePolling();
-    showScreen('home');
+    showScreen('welcome');
     toast('Left room');
   });
 
@@ -1027,32 +1177,50 @@ function attachEvents() {
     navigator.mediaDevices.addEventListener('devicechange', loadMicList);
   }
 
-  els.btnProfile.addEventListener('click', () => {
-    if (state.auth) {
-      renderProfileScreen();
-      showScreen('profile');
-    } else {
-      showScreen('auth');
+  for (const node of document.querySelectorAll('.theme-swatch')) {
+    node.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const theme = node.dataset.theme;
+      if (theme) applyTheme(theme);
+    });
+  }
+
+  els.eeDot.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    toggleEe();
+  });
+  document.addEventListener('click', (ev) => {
+    if (els.eePanel.dataset.open === 'true' && !els.eePanel.contains(ev.target)) {
+      els.eePanel.dataset.open = 'false';
     }
   });
 
-  els.btnBackHome.addEventListener('click', () => showScreen('home'));
-
-  els.btnLogout.addEventListener('click', () => {
-    setAuth(null);
-    toast('Signed out');
-    showScreen('auth');
-    switchAuthTab('signin');
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') {
+      if (els.eePanel.dataset.open === 'true') {
+        els.eePanel.dataset.open = 'false';
+        return;
+      }
+      if (state.drawerOpen) { closeDrawer(); return; }
+      if (state.currentScreen === 'settings' || state.currentScreen === 'profile' || state.currentScreen === 'auth') {
+        showScreen('welcome');
+      }
+    }
+    if (ev.key === 'Enter' && state.currentScreen === 'loading' && state.loadingReady) {
+      leaveLoading();
+    }
   });
 }
 
 async function init() {
   bindEls();
+  applyTheme(loadTheme());
   attachEvents();
   loadRecent();
   renderRecent();
   renderProfileChip();
   state.sessionId = getOrCreateSessionId();
+  state.loadingStart = performance.now();
 
   const hasApi = typeof window.api === 'object' && window.api !== null;
   if (hasApi && typeof window.api.getConfig === 'function') {
@@ -1065,21 +1233,35 @@ async function init() {
     } catch (err) {
       console.error('[renderer] failed to load config:', err);
     }
+
+    if (typeof window.api.onUpdateStatus === 'function') {
+      window.api.onUpdateStatus(applyUpdateStatus);
+    }
+    if (typeof window.api.getUpdateStatus === 'function') {
+      try {
+        const s = await window.api.getUpdateStatus();
+        if (s) applyUpdateStatus(s);
+      } catch {}
+    }
   } else {
     console.warn('[renderer] window.api missing — running in browser preview mode');
     state.signalingUrl = '';
     state.httpBaseUrl = '';
     state.appVersion = 'preview';
+    applyUpdateStatus({ state: 'not-available' });
   }
 
-  updateTopbarMeta();
+  renderAboutDetails();
+  renderHomeAuthHint();
 
-  const restored = state.httpBaseUrl ? await restoreSession() : false;
-  if (restored) {
-    showScreen('home');
-  } else {
-    showScreen('auth');
-    switchAuthTab('signin');
+  startLoadingWatchdog();
+
+  if (state.httpBaseUrl) {
+    restoreSession().finally(() => {
+      renderProfileChip();
+      renderHomeAuthHint();
+      renderAboutDetails();
+    });
   }
 
   loadMicList();

@@ -2,208 +2,298 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data:;" />
     <title>BroTalk</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter:wght@300..600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
-    <div id="app">
-      <aside class="sidebar">
-        <div class="sidebar-top">
-          <div class="logo">
-            <span class="logo-mark" aria-hidden="true"></span>
-            <span class="logo-text">BroTalk</span>
+  <body class="theme-ashy" data-screen="loading">
+    <div class="atmosphere" aria-hidden="true"></div>
+
+    <main class="stage">
+      <!-- Loading screen -->
+      <section id="screen-loading" class="screen" data-active="true">
+        <div class="loading-wrap">
+          <h1 class="wordmark">BroTalk</h1>
+          <p class="loading-line" id="loading-line">tuning the line…</p>
+
+          <div class="loading-actions">
+            <button id="btn-install-update" class="btn primary hidden">
+              <span class="btn-eyebrow">new version ready</span>
+              <span class="btn-label" id="install-update-label">Install update</span>
+            </button>
+            <button id="btn-enter" class="btn primary" disabled>
+              <span class="btn-label" id="enter-label">loading…</span>
+            </button>
           </div>
         </div>
+      </section>
 
-        <button id="btn-new-room" class="btn-primary sidebar-cta">
-          <span class="icon" aria-hidden="true">+</span>
-          <span>New room</span>
-        </button>
-
-        <div class="sidebar-section">
-          <div class="sidebar-section-title">Recent</div>
-          <ul id="recent-rooms" class="recent-list" aria-label="Recent rooms"></ul>
-        </div>
-
-        <div class="sidebar-footer">
-          <button id="btn-profile" class="profile-chip">
+      <!-- Welcome screen -->
+      <section id="screen-welcome" class="screen">
+        <header class="welcome-corner welcome-corner-left">
+          <button id="btn-open-menu-corner" class="btn ghost" title="Open menu">menu</button>
+        </header>
+        <header class="welcome-corner welcome-corner-right">
+          <button id="btn-settings" class="btn ghost" title="Settings">settings</button>
+          <button id="btn-profile" class="profile-chip" title="Account">
             <span class="avatar" id="profile-avatar">?</span>
-            <span class="profile-info">
-              <span class="profile-name" id="profile-name">Sign in</span>
-              <span class="profile-sub" id="profile-sub">Guest</span>
-            </span>
           </button>
-        </div>
-      </aside>
-
-      <main class="main">
-        <header class="topbar">
-          <div class="topbar-title" id="topbar-title">Welcome</div>
-          <div class="topbar-right">
-            <div class="online-pill" id="online-pill" title="People currently using BroTalk">
-              <span class="online-dot"></span>
-              <span class="online-count" id="online-count">—</span>
-              <span class="online-label">online</span>
-            </div>
-            <div class="topbar-meta" id="topbar-meta"></div>
-          </div>
         </header>
 
-        <div class="content">
-          <!-- Auth screen -->
-          <section id="screen-auth" class="screen">
-            <div class="card auth-card">
-              <div class="auth-tabs" role="tablist">
-                <button id="tab-signin" class="tab active" role="tab" aria-selected="true">Sign in</button>
-                <button id="tab-signup" class="tab" role="tab" aria-selected="false">Create account</button>
-              </div>
+        <div class="welcome-wrap">
+          <h1 class="wordmark">BroTalk</h1>
+          <p class="welcome-line" id="welcome-line">ready when you are.</p>
 
-              <form id="form-signin" class="auth-form" autocomplete="on">
-                <h2 class="form-title">Welcome back</h2>
-                <p class="form-subtitle">Sign in to join named rooms.</p>
-                <label class="field">
-                  <span class="field-label">Username</span>
-                  <input id="signin-username" type="text" maxlength="24" autocomplete="username" required />
-                </label>
-                <label class="field">
-                  <span class="field-label">Password</span>
-                  <input id="signin-password" type="password" maxlength="200" autocomplete="current-password" required />
-                </label>
-                <button type="submit" class="btn-primary btn-block">Sign in</button>
-                <div id="signin-error" class="error hidden"></div>
-                <button type="button" id="btn-guest" class="btn-link">Continue as guest →</button>
-              </form>
+          <button id="btn-start" class="btn primary btn-start">
+            <span class="btn-label">Start</span>
+          </button>
 
-              <form id="form-signup" class="auth-form hidden" autocomplete="on">
-                <h2 class="form-title">Create your account</h2>
-                <p class="form-subtitle">3–24 characters, letters/numbers/underscore/hyphen.</p>
-                <label class="field">
-                  <span class="field-label">Username</span>
-                  <input id="signup-username" type="text" maxlength="24" autocomplete="username" required />
-                </label>
-                <label class="field">
-                  <span class="field-label">Password</span>
-                  <input id="signup-password" type="password" maxlength="200" minlength="8" autocomplete="new-password" required />
-                  <span class="field-hint">At least 8 characters.</span>
-                </label>
-                <button type="submit" class="btn-primary btn-block">Create account</button>
-                <div id="signup-error" class="error hidden"></div>
-              </form>
-            </div>
-          </section>
-
-          <!-- Home screen -->
-          <section id="screen-home" class="screen hidden">
-            <div class="hero">
-              <h1 class="hero-title">Ready to talk.</h1>
-              <p class="hero-subtitle" id="hero-subtitle">Hop into a room and start a conversation.</p>
-            </div>
-
-            <div class="cards-row">
-              <div class="card action-card">
-                <div class="action-header">
-                  <span class="action-icon">⚡</span>
-                  <h3>Public lobby</h3>
-                </div>
-                <p class="action-desc">Anyone can join. No account needed.</p>
-                <button id="btn-join-lobby" class="btn-secondary btn-block">Join lobby</button>
-              </div>
-
-              <div class="card action-card">
-                <div class="action-header">
-                  <span class="action-icon">🔒</span>
-                  <h3>Named room</h3>
-                </div>
-                <p class="action-desc" id="named-room-desc">Pick a code, share it with friends.</p>
-                <form id="form-join-room" class="join-form">
-                  <input id="room-input" class="field-input" type="text" maxlength="32" placeholder="room code (e.g. brothers)" autocomplete="off" />
-                  <button type="submit" class="btn-primary">Enter</button>
-                </form>
-                <div id="room-form-error" class="error hidden"></div>
-              </div>
-            </div>
-
-            <div class="card setup-card">
-              <h3 class="setup-title">Audio setup</h3>
-              <label class="field">
-                <span class="field-label">Microphone</span>
-                <select id="mic-select" class="field-input"></select>
-              </label>
-              <button id="btn-refresh-mics" class="btn-link">Refresh devices</button>
-            </div>
-          </section>
-
-          <!-- Call screen -->
-          <section id="screen-call" class="screen hidden">
-            <div class="call-header">
-              <div class="room-pill">
-                <span class="room-pill-dot"></span>
-                <span class="room-pill-label">Room</span>
-                <code id="room-display">lobby</code>
-                <button id="btn-copy-room" class="btn-ghost-sm" title="Copy room code">Copy</button>
-              </div>
-              <button id="btn-leave" class="btn-danger-sm">Leave room</button>
-            </div>
-
-            <div class="card self-card">
-              <div class="self-head">
-                <span class="avatar" id="self-avatar">?</span>
-                <div class="self-info">
-                  <span class="self-name" id="self-name">—</span>
-                  <span class="self-role" id="self-role">You</span>
-                </div>
-              </div>
-              <div class="mic-meter" title="Your microphone level">
-                <div class="mic-meter-fill" id="mic-fill"></div>
-              </div>
-            </div>
-
-            <div class="card peers-card">
-              <h3 class="card-title">Connected peers</h3>
-              <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
-            </div>
-
-            <div class="control-bar">
-              <button id="btn-mute" class="btn-control" aria-pressed="false">
-                <span class="control-label">Mute</span>
-              </button>
-              <div class="volume-control">
-                <span class="control-label-sm">Volume</span>
-                <input id="volume-slider" type="range" min="0" max="100" value="100" />
-              </div>
-              <label class="control-mic">
-                <span class="control-label-sm">Mic</span>
-                <select id="call-mic-select" class="field-input field-input-sm"></select>
-              </label>
-            </div>
-
-            <div id="call-error" class="error hidden"></div>
-          </section>
-
-          <!-- Profile screen -->
-          <section id="screen-profile" class="screen hidden">
-            <div class="card profile-card">
-              <div class="profile-head">
-                <span class="avatar avatar-lg" id="profile-avatar-lg">?</span>
-                <div>
-                  <h2 class="profile-display-name" id="profile-display-name">—</h2>
-                  <p class="profile-sub-lg" id="profile-sub-lg">—</p>
-                </div>
-              </div>
-              <dl class="profile-details" id="profile-details"></dl>
-              <div class="profile-actions">
-                <button id="btn-back-home" class="btn-secondary">Back</button>
-                <button id="btn-logout" class="btn-danger">Sign out</button>
-              </div>
-            </div>
-          </section>
+          <div class="welcome-meta">
+            <span class="status" id="online-status">
+              <span class="online-dot"></span>
+              <span id="online-count">—</span> online
+            </span>
+          </div>
         </div>
-      </main>
+      </section>
 
-      <div id="remote-audios" hidden></div>
-      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+      <!-- Call screen -->
+      <section id="screen-call" class="screen">
+        <header class="conv-header">
+          <button id="btn-leave" class="btn ghost">← leave</button>
+          <div class="conv-title">
+            <span class="conv-eyebrow">room</span>
+            <code id="room-display">lobby</code>
+          </div>
+          <button id="btn-copy-room" class="btn ghost" title="Copy room code">copy</button>
+        </header>
+
+        <div class="scroll-area">
+          <div class="self-block">
+            <div class="self-head">
+              <span class="avatar avatar-lg" id="self-avatar">?</span>
+              <div class="self-info">
+                <span class="self-name" id="self-name">—</span>
+                <span class="status" id="self-role">you</span>
+              </div>
+            </div>
+            <div class="mic-meter" title="Your microphone level">
+              <div class="mic-meter-fill" id="mic-fill"></div>
+            </div>
+          </div>
+
+          <div class="peers-block">
+            <div class="section-title">connected</div>
+            <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
+          </div>
+
+          <div id="call-error" class="error hidden"></div>
+        </div>
+
+        <footer class="conv-footer">
+          <button id="btn-mute" class="btn" aria-pressed="false">
+            <span class="btn-label">Mute</span>
+          </button>
+          <div class="volume-control">
+            <span class="field-label">volume</span>
+            <input id="volume-slider" type="range" min="0" max="100" value="100" />
+          </div>
+          <label class="control-mic">
+            <span class="field-label">mic</span>
+            <select id="call-mic-select" class="field-input field-input-sm"></select>
+          </label>
+        </footer>
+      </section>
+
+      <!-- Settings screen -->
+      <section id="screen-settings" class="screen">
+        <header class="conv-header">
+          <button id="btn-back-from-settings" class="btn ghost">← back</button>
+          <div class="conv-title">
+            <span class="conv-eyebrow">settings</span>
+          </div>
+          <span></span>
+        </header>
+
+        <div class="scroll-area scroll-area-narrow">
+          <div class="settings-block">
+            <div class="section-title">theme</div>
+            <div class="theme-grid">
+              <label class="theme-swatch" data-theme="ashy">
+                <input type="radio" name="theme" value="ashy" />
+                <span class="theme-preview theme-preview-ashy" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#d4c5b2"></span>
+                  <span class="theme-preview-line" style="background:#e8e4e1"></span>
+                  <span class="theme-preview-line" style="background:#9a9695; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Ashy Smoke</div>
+                  <div class="theme-swatch-sub">warm dark · champagne accent · serif voice</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="green">
+                <input type="radio" name="theme" value="green" />
+                <span class="theme-preview theme-preview-green" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#00d97e; box-shadow:0 0 8px rgba(0,217,126,0.6)"></span>
+                  <span class="theme-preview-line" style="background:#ededed"></span>
+                  <span class="theme-preview-line" style="background:#9aa3a0; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Forest Green</div>
+                  <div class="theme-swatch-sub">near-black · green glow · classic BroTalk</div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-block">
+            <div class="section-title">microphone</div>
+            <label class="field">
+              <span class="field-label">device</span>
+              <select id="mic-select" class="field-input"></select>
+            </label>
+            <button id="btn-refresh-mics" class="btn ghost">refresh devices</button>
+          </div>
+
+          <div class="settings-block">
+            <div class="section-title">about</div>
+            <dl class="meta-list" id="about-details"></dl>
+          </div>
+        </div>
+      </section>
+
+      <!-- Profile screen -->
+      <section id="screen-profile" class="screen">
+        <header class="conv-header">
+          <button id="btn-back-from-profile" class="btn ghost">← back</button>
+          <div class="conv-title">
+            <span class="conv-eyebrow">profile</span>
+          </div>
+          <span></span>
+        </header>
+
+        <div class="scroll-area scroll-area-narrow">
+          <div class="profile-block">
+            <span class="avatar avatar-xl" id="profile-avatar-lg">?</span>
+            <div class="profile-block-info">
+              <h2 class="profile-display-name" id="profile-display-name">—</h2>
+              <p class="profile-sub-lg" id="profile-sub-lg">—</p>
+            </div>
+          </div>
+
+          <dl class="meta-list" id="profile-details"></dl>
+
+          <div class="profile-actions">
+            <button id="btn-logout" class="btn">Sign out</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Auth screen -->
+      <section id="screen-auth" class="screen">
+        <header class="conv-header">
+          <button id="btn-back-from-auth" class="btn ghost">← back</button>
+          <div class="conv-title">
+            <span class="conv-eyebrow">account</span>
+          </div>
+          <span></span>
+        </header>
+
+        <div class="scroll-area scroll-area-narrow">
+          <div class="auth-tabs" role="tablist">
+            <button id="tab-signin" class="tab active" role="tab" aria-selected="true">Sign in</button>
+            <button id="tab-signup" class="tab" role="tab" aria-selected="false">Create account</button>
+          </div>
+
+          <form id="form-signin" class="auth-form" autocomplete="on">
+            <h2 class="form-title">welcome back</h2>
+            <p class="form-subtitle">Sign in to join named rooms.</p>
+            <label class="field">
+              <span class="field-label">username</span>
+              <input id="signin-username" type="text" maxlength="24" autocomplete="username" required />
+            </label>
+            <label class="field">
+              <span class="field-label">password</span>
+              <input id="signin-password" type="password" maxlength="200" autocomplete="current-password" required />
+            </label>
+            <button type="submit" class="btn primary btn-block">Sign in</button>
+            <div id="signin-error" class="error hidden"></div>
+            <button type="button" id="btn-guest" class="btn ghost btn-block">continue as guest →</button>
+          </form>
+
+          <form id="form-signup" class="auth-form hidden" autocomplete="on">
+            <h2 class="form-title">create your account</h2>
+            <p class="form-subtitle">3–24 characters, letters/numbers/underscore/hyphen.</p>
+            <label class="field">
+              <span class="field-label">username</span>
+              <input id="signup-username" type="text" maxlength="24" autocomplete="username" required />
+            </label>
+            <label class="field">
+              <span class="field-label">password</span>
+              <input id="signup-password" type="password" maxlength="200" minlength="8" autocomplete="new-password" required />
+              <span class="field-hint">at least 8 characters.</span>
+            </label>
+            <button type="submit" class="btn primary btn-block">Create account</button>
+            <div id="signup-error" class="error hidden"></div>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <!-- Drawer (slides in from left) -->
+    <aside id="drawer" class="drawer" data-open="false" aria-label="Rooms">
+      <header class="drawer-header">
+        <h3>Rooms</h3>
+        <button id="drawer-close" class="btn ghost" title="Close menu">×</button>
+      </header>
+
+      <div class="drawer-section">
+        <div class="section-title">jump in</div>
+        <button id="btn-join-lobby" class="drawer-action">
+          <span class="drawer-action-label">Public lobby</span>
+          <span class="drawer-action-sub">anyone can join · live count above</span>
+        </button>
+
+        <form id="form-join-room" class="drawer-form">
+          <span class="field-label" id="named-room-desc">private room — pick a code</span>
+          <div class="drawer-form-row">
+            <input id="room-input" class="field-input" type="text" maxlength="32" placeholder="room code" autocomplete="off" />
+            <button type="submit" class="btn primary">enter</button>
+          </div>
+          <div id="room-form-error" class="error hidden"></div>
+        </form>
+      </div>
+
+      <div class="drawer-section drawer-section-grow">
+        <div class="section-title">recent</div>
+        <ul id="recent-rooms" class="drawer-list" aria-label="Recent rooms"></ul>
+      </div>
+
+      <div class="drawer-footer">
+        <button id="btn-drawer-profile" class="profile-chip profile-chip-wide">
+          <span class="avatar" id="drawer-avatar">?</span>
+          <span class="profile-info">
+            <span class="profile-name" id="drawer-profile-name">Sign in</span>
+            <span class="profile-sub" id="drawer-profile-sub">Guest</span>
+          </span>
+        </button>
+        <button id="btn-drawer-settings" class="btn ghost btn-block">settings</button>
+      </div>
+    </aside>
+    <div id="drawer-scrim" class="drawer-scrim" data-open="false"></div>
+
+    <!-- Easter-egg dot -->
+    <button id="ee-dot" class="ee-dot" aria-label="."></button>
+    <div id="ee-panel" class="ee-panel" data-open="false">
+      <p class="ee-poem" id="ee-poem">a line meant only for the ones who notice.</p>
     </div>
+
+    <div id="remote-audios" hidden></div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
     <script src="renderer.js"></script>
   </body>
