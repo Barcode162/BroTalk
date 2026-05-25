@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, session } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, session, shell } = require('electron');
 const path = require('path');
 
 Menu.setApplicationMenu(null);
@@ -99,6 +99,18 @@ ipcMain.on('update:install', () => {
   } catch (err) {
     console.error('[updater] quitAndInstall failed:', err);
     installingUpdate = false;
+  }
+});
+
+ipcMain.on('open-mic-settings', () => {
+  if (process.platform === 'win32') {
+    shell.openExternal('ms-settings:privacy-microphone').catch((err) => {
+      console.warn('[main] open mic settings failed:', err.message);
+    });
+  } else if (process.platform === 'darwin') {
+    shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone').catch((err) => {
+      console.warn('[main] open mic settings failed:', err.message);
+    });
   }
 });
 

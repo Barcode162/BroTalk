@@ -1,5 +1,6 @@
 /* ============================================================
- * BroTalk renderer — v0.2.6 Ashy Smoke
+ * BroTalk renderer — v0.3.0
+ * Reliability refit + UX polish + 12-theme system
  * ============================================================ */
 
 const LS_TOKEN   = 'brotalk.token';
@@ -10,8 +11,30 @@ const MAX_RECENT = 8;
 const PRESENCE_PING_MS = 30000;
 const MIN_LOADING_MS   = 1200;
 const MAX_LOADING_MS   = 3500;
-const ALLOWED_THEMES   = ['ashy', 'green'];
-const DEFAULT_THEME    = 'ashy';
+
+const ALLOWED_THEMES = [
+  'ashy', 'green',
+  'midnight', 'cyber', 'sakura', 'brutalist', 'velvet',
+  'ocean', 'terracotta', 'vapor', 'noir', 'aurora',
+];
+const DEFAULT_THEME = 'ashy';
+const LIGHT_THEMES = new Set(['sakura', 'terracotta', 'noir']);
+
+const RECONNECT_BACKOFF_MS = [800, 1600, 3200, 6400, 12800, 25000];
+const HEARTBEAT_CLIENT_TIMEOUT_MS = 50_000;
+const ICE_RESTART_MAX_TRIES = 3;
+const ICE_RESTART_DELAY_MS = 1200;
+
+const CHAT_CHUNK_SIZE = 16 * 1024;
+const CHAT_BUFFER_HIGH = 16 * 1024 * 1024;
+const CHAT_BUFFER_LOW  = 1 * 1024 * 1024;
+const CHAT_HISTORY_MAX = 50;
+
+const DEFAULT_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+];
 
 const EE_LINES = [
   "a line meant only for the ones who notice.",
@@ -19,6 +42,17 @@ const EE_LINES = [
   "the dot is white. the rest is warm. that's the deal.",
   "you and your people. nothing else in the room.",
   "stay a while.",
+];
+
+const ROOM_ADJ = [
+  'quiet','warm','bright','soft','wild','calm','gold','silver','velvet','misty',
+  'amber','jade','rust','coral','frost','silent','crimson','azure','linen','ember',
+  'plum','olive','dusty','silken','hollow','tender','noble','windy','sleepy','curious',
+];
+const ROOM_NOUN = [
+  'otter','fox','heron','willow','meadow','harbor','lantern','cabin','river','feather',
+  'comet','orchid','cedar','pebble','sparrow','marble','thistle','glacier','prairie','aurora',
+  'finch','poppy','dune','grove','rune','tide','quill','beacon','satin','clover',
 ];
 
 function getOrCreateSessionId() {
@@ -47,11 +81,15 @@ const state = {
   remoteAudios: {},
   peerNames: {},
   peerAuthed: {},
+  iceRestartCount: {},
   myPeerId: null,
   myName: '',
   myRoom: '',
+  intendedRoom: '',
   pendingMode: 'auth',
   isMuted: false,
+  pttHeld: false,
+  pttPrevMute: false,
   masterVolume: 1.0,
   selectedDeviceId: '',
   availableMics: [],
@@ -63,6 +101,7 @@ const state = {
   currentScreen: 'loading',
   recentRooms: [],
   onlineCount: null,
+  lobbyCount: null,
   onlinePollTimer: 0,
   sessionId: '',
   theme: DEFAULT_THEME,
@@ -77,19 +116,15 @@ const state = {
   chatUnread: 0,
   chatComposerHasText: false,
   chatSendQueue: Promise.resolve(),
+  myChatHistory: [],
+  reconnectAttempt: 0,
+  reconnectTimer: 0,
+  wsLastMsg: 0,
+  wsHeartbeatTimer: 0,
+  watching: false,
+  micError: null,
+  micPopoverOpen: false,
 };
-
-const CHAT_CHUNK_SIZE = 16 * 1024;
-const CHAT_BUFFER_HIGH = 16 * 1024 * 1024;
-const CHAT_BUFFER_LOW  = 1 * 1024 * 1024;
-
-const ONLINE_POLL_MS = 15000;
-
-const DEFAULT_ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-];
 
 function buildRtcConfig() {
   return {
@@ -103,24 +138,27 @@ function bindEls() {
   const ids = [
     'screen-loading', 'screen-welcome', 'screen-call', 'screen-settings', 'screen-profile', 'screen-auth',
     'loading-line', 'btn-install-update', 'install-update-label', 'btn-enter', 'enter-label',
-    'btn-open-menu-corner', 'btn-settings', 'btn-profile', 'profile-avatar',
-    'welcome-line', 'btn-start', 'online-status', 'online-count',
+    'btn-open-menu-corner', 'btn-settings', 'btn-profile', 'profile-avatar', 'btn-signin-corner',
+    'welcome-line', 'btn-start', 'online-status', 'online-count', 'lobby-count', 'lobby-count-wrap',
     'btn-leave', 'room-display', 'btn-copy-room',
     'self-avatar', 'self-name', 'self-role', 'mic-fill',
-    'btn-mute', 'volume-slider', 'call-mic-select', 'call-error',
+    'btn-mute', 'volume-slider', 'btn-mic-popover', 'mic-popover', 'call-mic-select', 'call-error',
+    'reconnect-pill', 'reconnect-pill-text',
     'btn-back-from-settings', 'mic-select', 'btn-refresh-mics', 'about-details',
     'btn-back-from-profile', 'profile-avatar-lg', 'profile-display-name', 'profile-sub-lg', 'profile-details', 'btn-logout',
     'btn-back-from-auth', 'tab-signin', 'tab-signup', 'form-signin', 'form-signup',
     'signin-username', 'signin-password', 'signin-error',
     'signup-username', 'signup-password', 'signup-error', 'btn-guest',
     'drawer', 'drawer-close', 'drawer-scrim',
-    'btn-join-lobby', 'form-join-room', 'room-input', 'room-form-error', 'named-room-desc',
+    'btn-join-lobby', 'form-join-room', 'room-input', 'btn-room-dice', 'room-form-error', 'named-room-desc',
     'recent-rooms', 'btn-drawer-profile', 'drawer-avatar', 'drawer-profile-name', 'drawer-profile-sub',
     'btn-drawer-settings',
     'ee-dot', 'ee-panel', 'ee-poem',
     'peers-list', 'remote-audios', 'toast',
     'btn-toggle-chat', 'chat-unread', 'chat-panel', 'btn-close-chat',
     'chat-empty', 'chat-messages', 'chat-form', 'chat-file', 'chat-input', 'btn-chat-send',
+    'mic-denied-card', 'mic-denied-instructions', 'btn-mic-open-settings', 'btn-mic-retry',
+    'theme-grid',
   ];
   for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
@@ -161,8 +199,9 @@ function loadTheme() {
 function applyTheme(theme) {
   if (!ALLOWED_THEMES.includes(theme)) theme = DEFAULT_THEME;
   state.theme = theme;
-  document.body.classList.remove('theme-ashy', 'theme-green');
+  for (const t of ALLOWED_THEMES) document.body.classList.remove('theme-' + t);
   document.body.classList.add('theme-' + theme);
+  document.body.classList.toggle('theme-light', LIGHT_THEMES.has(theme));
   try { localStorage.setItem(LS_THEME, theme); } catch {}
   for (const node of document.querySelectorAll('.theme-swatch')) {
     const active = node.dataset.theme === theme;
@@ -183,9 +222,11 @@ function showScreen(name) {
     el.dataset.active = (key.toLowerCase() === name) ? 'true' : 'false';
   }
   if (name !== 'welcome' && name !== 'loading') closeDrawer();
+  closeMicPopover();
+  manageWatchChannel();
 }
 
-/* ── Online counter ──────────────────────────────── */
+/* ── Online counter + watch channel ──────────────── */
 
 function renderOnlineCount() {
   if (!els.onlineCount) return;
@@ -196,11 +237,23 @@ function renderOnlineCount() {
     els.onlineCount.textContent = String(state.onlineCount);
     els.onlineStatus.classList.remove('is-stale');
   }
+  if (els.lobbyCount && els.lobbyCountWrap) {
+    if (state.lobbyCount === null || state.lobbyCount === 0) {
+      els.lobbyCountWrap.classList.add('hidden');
+    } else {
+      els.lobbyCount.textContent = String(state.lobbyCount);
+      els.lobbyCountWrap.classList.remove('hidden');
+    }
+  }
 }
 
-function setOnlineCount(n) {
-  if (typeof n !== 'number' || !isFinite(n) || n < 0) return;
-  state.onlineCount = Math.floor(n);
+function applyStats(payload) {
+  if (typeof payload.online === 'number' && payload.online >= 0) {
+    state.onlineCount = Math.floor(payload.online);
+  }
+  if (typeof payload.lobby === 'number' && payload.lobby >= 0) {
+    state.lobbyCount = Math.floor(payload.lobby);
+  }
   renderOnlineCount();
 }
 
@@ -219,7 +272,7 @@ async function pingPresence() {
       throw new Error('HTTP ' + res.status);
     }
     const data = await res.json();
-    setOnlineCount(data.online);
+    applyStats(data);
   } catch (err) {
     console.warn('[renderer] pingPresence failed:', err.message);
     fetchOnlineCountFallback();
@@ -232,7 +285,7 @@ async function fetchOnlineCountFallback() {
     const res = await fetch(state.httpBaseUrl + '/stats', { cache: 'no-store' });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    setOnlineCount(data.online);
+    applyStats(data);
   } catch (err) {
     console.warn('[renderer] /stats fallback failed:', err.message);
   }
@@ -249,6 +302,56 @@ function stopOnlinePolling() {
   if (state.onlinePollTimer) {
     clearInterval(state.onlinePollTimer);
     state.onlinePollTimer = 0;
+  }
+}
+
+function manageWatchChannel() {
+  const wantWatch = state.currentScreen === 'welcome' && !state.myRoom;
+  if (wantWatch && !state.watching) startWatchChannel();
+  else if (!wantWatch && state.watching) stopWatchChannel();
+}
+
+function startWatchChannel() {
+  if (!state.signalingUrl || state.watching) return;
+  if (state.signaling && state.signaling.readyState === WebSocket.OPEN && !state.myPeerId) {
+    sendSignal({ type: 'watch' });
+    state.watching = true;
+    return;
+  }
+  if (state.signaling) return;
+  // open a dedicated watch socket
+  try {
+    const ws = new WebSocket(state.signalingUrl);
+    state.signaling = ws;
+    ws.onopen = () => {
+      sendSignal({ type: 'watch' });
+      state.watching = true;
+      state.wsLastMsg = Date.now();
+      startWsHeartbeatWatchdog();
+    };
+    ws.onmessage = (ev) => handleSignalingMessage(ev.data);
+    ws.onclose = () => {
+      stopWsHeartbeatWatchdog();
+      state.watching = false;
+      state.signaling = null;
+      if (state.currentScreen === 'welcome' && !state.myRoom) {
+        scheduleReconnect();
+      }
+    };
+    ws.onerror = () => {};
+  } catch (err) {
+    console.warn('[renderer] watch socket failed:', err.message);
+  }
+}
+
+function stopWatchChannel() {
+  if (!state.watching) return;
+  sendSignal({ type: 'unwatch' });
+  state.watching = false;
+  if (state.signaling && !state.myPeerId) {
+    try { state.signaling.close(); } catch {}
+    state.signaling = null;
+    stopWsHeartbeatWatchdog();
   }
 }
 
@@ -345,18 +448,29 @@ function toggleEe() {
 /* ── Profile UI ──────────────────────────────────── */
 
 function renderProfileChip() {
-  const u = state.auth ? state.auth.user.username : null;
-  const initial = u ? initialOf(u) : '?';
-  const name = u ? u : 'Sign in';
+  const u = state.auth ? state.auth.user : null;
+  const initial = u ? initialOf(u.username) : '?';
+  const name = u ? u.username : 'Sign in';
   const sub = u ? 'view profile' : 'guest';
+
   if (els.profileAvatar) els.profileAvatar.textContent = initial;
   if (els.drawerAvatar) els.drawerAvatar.textContent = initial;
   if (els.drawerProfileName) els.drawerProfileName.textContent = name;
   if (els.drawerProfileSub) els.drawerProfileSub.textContent = sub;
+
+  if (els.btnProfile && els.btnSigninCorner) {
+    if (u) {
+      els.btnProfile.classList.remove('hidden');
+      els.btnSigninCorner.classList.add('hidden');
+    } else {
+      els.btnProfile.classList.add('hidden');
+      els.btnSigninCorner.classList.remove('hidden');
+    }
+  }
 }
 
 function renderProfileScreen() {
-  if (!state.auth) {
+  if (!state.auth || !state.auth.user) {
     showScreen('auth');
     return;
   }
@@ -381,14 +495,16 @@ function renderAboutDetails() {
 }
 
 function renderHomeAuthHint() {
-  if (state.auth) {
+  if (state.auth && state.auth.user) {
     if (els.welcomeLine) els.welcomeLine.textContent = `welcome back, ${state.auth.user.username}.`;
     if (els.namedRoomDesc) els.namedRoomDesc.textContent = 'private room — pick a code, share it';
     if (els.roomInput) els.roomInput.disabled = false;
+    if (els.btnRoomDice) els.btnRoomDice.disabled = false;
   } else {
     if (els.welcomeLine) els.welcomeLine.textContent = 'ready when you are.';
     if (els.namedRoomDesc) els.namedRoomDesc.textContent = 'sign in to use private rooms';
     if (els.roomInput) els.roomInput.disabled = true;
+    if (els.btnRoomDice) els.btnRoomDice.disabled = true;
   }
 }
 
@@ -423,6 +539,13 @@ function renderRecent() {
     li.addEventListener('click', () => requestJoinRoom(r));
     els.recentRooms.appendChild(li);
   }
+}
+
+function generateRoomCode() {
+  const adj = ROOM_ADJ[Math.floor(Math.random() * ROOM_ADJ.length)];
+  const noun = ROOM_NOUN[Math.floor(Math.random() * ROOM_NOUN.length)];
+  const num = Math.floor(Math.random() * 89) + 10;
+  return `${adj}-${noun}-${num}`;
 }
 
 /* ── Auth ────────────────────────────────────────── */
@@ -474,20 +597,47 @@ async function apiMe(token) {
   const res = await fetch(state.httpBaseUrl + '/auth/me', {
     headers: { Authorization: 'Bearer ' + token },
   });
-  if (!res.ok) throw new Error('Session expired');
+  if (res.status === 401) {
+    const err = new Error('Session expired');
+    err.unauthorized = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const err = new Error('Network error (HTTP ' + res.status + ')');
+    err.network = true;
+    throw err;
+  }
   return res.json();
 }
 
 async function restoreSession() {
   const stored = loadStoredAuth();
   if (!stored || !stored.token) return false;
+  setAuth({ token: stored.token, user: null });
   try {
     const me = await apiMe(stored.token);
     setAuth({ token: stored.token, user: me.user });
     return true;
-  } catch {
-    setAuth(null);
-    return false;
+  } catch (err) {
+    if (err && err.unauthorized) {
+      setAuth(null);
+      return false;
+    }
+    // network blip — retry once, then keep the token rather than logging out
+    try {
+      await new Promise((r) => setTimeout(r, 1500));
+      const me = await apiMe(stored.token);
+      setAuth({ token: stored.token, user: me.user });
+      return true;
+    } catch (err2) {
+      if (err2 && err2.unauthorized) {
+        setAuth(null);
+        return false;
+      }
+      console.warn('[renderer] session restore offline — keeping token:', err2.message);
+      // keep token, will recheck on next user action
+      return true;
+    }
   }
 }
 
@@ -566,7 +716,7 @@ function clearError(el) {
   el.classList.add('hidden');
 }
 
-/* ── Mic handling ────────────────────────────────── */
+/* ── Mic handling + denial card ──────────────────── */
 
 function buildAudioConstraints(deviceId) {
   const audio = {
@@ -598,16 +748,64 @@ function buildAudioConstraints(deviceId) {
   return { audio, video: false };
 }
 
+function classifyMicError(err) {
+  const name = err && err.name || '';
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') return 'denied';
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'no-device';
+  if (name === 'NotReadableError' || name === 'TrackStartError') return 'busy';
+  if (name === 'OverconstrainedError') return 'overconstrained';
+  return 'unknown';
+}
+
+function showMicDeniedCard(kind) {
+  state.micError = kind;
+  if (!els.micDeniedCard) return;
+  const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+  const isMac = /Mac/i.test(platform);
+  const isWin = /Win/i.test(platform);
+  let title = 'Microphone access needed';
+  let body = 'BroTalk uses your microphone for voice chat. Without it, no one can hear you.';
+  let steps = '';
+  if (kind === 'no-device') {
+    title = 'No microphone found';
+    body = 'BroTalk couldn\'t find an audio input device. Plug in a mic or headset, then retry.';
+  } else if (kind === 'busy') {
+    title = 'Microphone is in use';
+    body = 'Another app is using your microphone. Close it (Discord, Zoom, OBS, browser tabs) and retry.';
+  } else if (kind === 'denied') {
+    if (isWin) {
+      steps = '<ol><li>Open <strong>Settings → Privacy &amp; security → Microphone</strong></li><li>Turn on <em>Microphone access</em></li><li>Make sure <em>Let desktop apps access your microphone</em> is on</li><li>Come back here and tap <em>Try again</em></li></ol>';
+    } else if (isMac) {
+      steps = '<ol><li>Open <strong>System Settings → Privacy &amp; Security → Microphone</strong></li><li>Enable <em>BroTalk</em></li><li>Come back here and tap <em>Try again</em></li></ol>';
+    } else {
+      steps = '<p>Open your system settings, find Microphone permissions, and enable access for BroTalk. Then come back and tap <em>Try again</em>.</p>';
+    }
+  }
+  els.micDeniedCard.querySelector('.mic-denied-title').textContent = title;
+  els.micDeniedCard.querySelector('.mic-denied-body').textContent = body;
+  els.micDeniedInstructions.innerHTML = steps;
+  els.btnMicOpenSettings.classList.toggle('hidden', kind !== 'denied' || (!isWin && !isMac));
+  els.micDeniedCard.classList.remove('hidden');
+}
+
+function hideMicDeniedCard() {
+  state.micError = null;
+  if (els.micDeniedCard) els.micDeniedCard.classList.add('hidden');
+}
+
 async function getMicStream() {
   if (state.localStream) return state.localStream;
   try {
     const stream = await navigator.mediaDevices.getUserMedia(buildAudioConstraints(state.selectedDeviceId));
     state.localStream = stream;
+    hideMicDeniedCard();
     loadMicList();
     return stream;
   } catch (err) {
     console.error('[renderer] getUserMedia failed:', err);
-    throw new Error('Microphone access denied or unavailable: ' + err.message);
+    const kind = classifyMicError(err);
+    showMicDeniedCard(kind);
+    throw new Error('Microphone unavailable');
   }
 }
 
@@ -777,6 +975,7 @@ function createPeerConnection(peerId, isInitiator) {
   const pc = new RTCPeerConnection(buildRtcConfig());
   pc.pendingIce = [];
   state.peerConnections[peerId] = pc;
+  state.iceRestartCount[peerId] = 0;
 
   if (state.localStream) {
     for (const track of state.localStream.getTracks()) {
@@ -815,26 +1014,48 @@ function createPeerConnection(peerId, isInitiator) {
   pc.onconnectionstatechange = () => {
     console.log(`[renderer] peer ${peerId.slice(0, 6)} connection state:`, pc.connectionState);
     renderPeersList();
-    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+    if (pc.connectionState === 'failed') {
+      attemptIceRestart(peerId);
+    } else if (pc.connectionState === 'closed') {
       cleanupPeer(peerId);
+    } else if (pc.connectionState === 'connected') {
+      state.iceRestartCount[peerId] = 0;
     }
   };
 
   if (isInitiator) {
-    (async () => {
-      try {
-        const offer = await pc.createOffer();
-        offer.sdp = enhanceOpusSdp(offer.sdp);
-        await pc.setLocalDescription(offer);
-        await applyHighQualityAudio(pc);
-        sendSignal({ type: 'offer', to: peerId, sdp: pc.localDescription });
-      } catch (err) {
-        console.error('[renderer] createOffer failed:', err);
-      }
-    })();
+    sendOfferTo(pc, peerId, /*restart*/ false);
   }
 
   return pc;
+}
+
+async function sendOfferTo(pc, peerId, restart) {
+  try {
+    const offer = await pc.createOffer(restart ? { iceRestart: true } : undefined);
+    offer.sdp = enhanceOpusSdp(offer.sdp);
+    await pc.setLocalDescription(offer);
+    await applyHighQualityAudio(pc);
+    sendSignal({ type: 'offer', to: peerId, sdp: pc.localDescription });
+  } catch (err) {
+    console.error('[renderer] sendOffer failed:', err);
+  }
+}
+
+async function attemptIceRestart(peerId) {
+  const pc = state.peerConnections[peerId];
+  if (!pc) return;
+  const tries = state.iceRestartCount[peerId] || 0;
+  if (tries >= ICE_RESTART_MAX_TRIES) {
+    console.warn(`[renderer] giving up on peer ${peerId.slice(0, 6)} after ${tries} ICE restart attempts`);
+    cleanupPeer(peerId);
+    return;
+  }
+  state.iceRestartCount[peerId] = tries + 1;
+  console.log(`[renderer] ICE restart attempt ${tries + 1} for peer ${peerId.slice(0, 6)}`);
+  await new Promise((r) => setTimeout(r, ICE_RESTART_DELAY_MS));
+  if (pc.connectionState === 'closed') return;
+  await sendOfferTo(pc, peerId, true);
 }
 
 async function flushPendingIce(pc) {
@@ -855,6 +1076,7 @@ function cleanupPeer(peerId) {
     delete state.dataChannels[peerId];
   }
   delete state.incomingFiles[peerId];
+  delete state.iceRestartCount[peerId];
   const pc = state.peerConnections[peerId];
   if (pc) {
     try { pc.close(); } catch {}
@@ -878,6 +1100,7 @@ function setupDataChannel(dc, peerId) {
 
   dc.onopen = () => {
     console.log(`[renderer] chat channel open with ${peerId.slice(0, 6)}`);
+    sendMyChatHistory(dc);
   };
   dc.onclose = () => {
     if (state.dataChannels[peerId] === dc) delete state.dataChannels[peerId];
@@ -887,6 +1110,29 @@ function setupDataChannel(dc, peerId) {
     console.warn(`[renderer] chat channel error with ${peerId.slice(0, 6)}:`, err);
   };
   dc.onmessage = (ev) => handleChatWireMessage(peerId, ev.data);
+}
+
+function sendMyChatHistory(dc) {
+  if (state.myChatHistory.length === 0) return;
+  try {
+    dc.send(JSON.stringify({ type: 'history', messages: state.myChatHistory }));
+  } catch (err) {
+    console.warn('[renderer] history send failed:', err);
+  }
+}
+
+function recordMyMessage(msg) {
+  if (msg.kind !== 'text') return; // files can't be replayed (data not retained)
+  state.myChatHistory.push({
+    type: 'text',
+    id: msg.id,
+    name: msg.name,
+    text: msg.text,
+    ts: msg.ts,
+  });
+  if (state.myChatHistory.length > CHAT_HISTORY_MAX) {
+    state.myChatHistory.splice(0, state.myChatHistory.length - CHAT_HISTORY_MAX);
+  }
 }
 
 function handleChatWireMessage(peerId, data) {
@@ -901,23 +1147,32 @@ function handleChatWireMessage(peerId, data) {
       receiveFileEnd(peerId, msg);
     } else if (msg.type === 'file-abort') {
       delete state.incomingFiles[peerId];
+    } else if (msg.type === 'history') {
+      if (Array.isArray(msg.messages)) {
+        for (const m of msg.messages) {
+          if (m && m.type === 'text') receiveText(peerId, m, /*backfill*/ true);
+        }
+      }
     }
     return;
   }
   receiveFileChunk(peerId, data);
 }
 
-function receiveText(peerId, msg) {
+function receiveText(peerId, msg, backfill) {
   const text = String(msg.text || '').slice(0, 4000);
   if (!text) return;
+  const id = String(msg.id || crypto.randomUUID());
+  if (state.chatMessages.some((m) => m.id === id)) return;
   appendChatMessage({
-    id: String(msg.id || crypto.randomUUID()),
+    id,
     from: peerId,
     name: String(msg.name || state.peerNames[peerId] || 'peer').slice(0, 24),
     kind: 'text',
     text,
     ts: Number(msg.ts) || Date.now(),
     mine: false,
+    backfill: !!backfill,
   });
 }
 
@@ -1017,7 +1272,7 @@ function sendChatText(text) {
       console.warn('[renderer] chat send failed:', err);
     }
   }
-  appendChatMessage({
+  const mine = {
     id: msg.id,
     from: state.myPeerId,
     name: msg.name,
@@ -1027,7 +1282,9 @@ function sendChatText(text) {
     mine: true,
     delivered,
     peerCount: channels.length,
-  });
+  };
+  appendChatMessage(mine);
+  recordMyMessage(mine);
 }
 
 async function sendChatFile(file) {
@@ -1145,7 +1402,7 @@ function ensureChatEmptyHidden() {
 function appendChatMessage(msg) {
   state.chatMessages.push(msg);
   const li = document.createElement('li');
-  li.className = 'chat-msg' + (msg.mine ? ' is-mine' : '');
+  li.className = 'chat-msg' + (msg.mine ? ' is-mine' : '') + (msg.backfill ? ' is-backfill' : '');
   li.dataset.msgId = msg.id;
 
   const head = document.createElement('div');
@@ -1169,14 +1426,30 @@ function appendChatMessage(msg) {
     renderFileBubble(body, msg);
   }
   li.appendChild(body);
-  els.chatMessages.appendChild(li);
+
+  // backfill messages get inserted in timestamp order; live messages append at end
+  if (msg.backfill) {
+    let inserted = false;
+    const existing = els.chatMessages.children;
+    for (let i = 0; i < existing.length; i++) {
+      const otherMsg = state.chatMessages.find((m) => m.id === existing[i].dataset.msgId);
+      if (otherMsg && otherMsg.ts > msg.ts) {
+        els.chatMessages.insertBefore(li, existing[i]);
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) els.chatMessages.appendChild(li);
+  } else {
+    els.chatMessages.appendChild(li);
+  }
 
   ensureChatEmptyHidden();
   const nearBottom = els.chatMessages.scrollHeight - els.chatMessages.scrollTop - els.chatMessages.clientHeight < 80;
   if (msg.mine || nearBottom || state.chatOpen) {
     els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
   }
-  if (!msg.mine && !state.chatOpen) {
+  if (!msg.mine && !state.chatOpen && !msg.backfill) {
     state.chatUnread++;
     renderChatUnread();
   }
@@ -1357,6 +1630,7 @@ function clearChatHistory() {
   state.chatMessages = [];
   state.chatUnread = 0;
   state.incomingFiles = {};
+  state.myChatHistory = [];
   for (const url of state.chatBlobUrls) {
     try { URL.revokeObjectURL(url); } catch {}
   }
@@ -1394,18 +1668,26 @@ function renderPeersList() {
 }
 
 async function handleSignalingMessage(raw) {
+  state.wsLastMsg = Date.now();
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
+
+  if (msg.type === 'ping') {
+    sendSignal({ type: 'pong', t: msg.t });
+    return;
+  }
 
   if (msg.type === 'welcome') {
     state.myPeerId = msg.id;
     state.myRoom = msg.room;
     state.myName = msg.name || state.myName;
+    state.reconnectAttempt = 0;
     els.roomDisplay.textContent = msg.room;
     els.selfName.textContent = state.myName || msg.id.slice(0, 8);
     els.selfAvatar.textContent = initialOf(state.myName);
-    els.selfRole.textContent = state.auth ? 'you · signed in' : 'you · guest';
+    els.selfRole.textContent = state.auth && state.auth.user ? 'you · signed in' : 'you · guest';
     pushRecent(msg.room);
+    hideReconnectPill();
   } else if (msg.type === 'peers') {
     const incomingIds = msg.peers.map((p) => p.id);
     for (const p of msg.peers) {
@@ -1464,15 +1746,15 @@ async function handleSignalingMessage(raw) {
     delete state.peerNames[msg.id];
     delete state.peerAuthed[msg.id];
   } else if (msg.type === 'stats') {
-    setOnlineCount(msg.online);
+    applyStats(msg);
   } else if (msg.type === 'join-error') {
     showError(els.callError, msg.error || 'Failed to join');
     toast(msg.error || 'Failed to join', 3500);
-    disconnectAll();
-    startOnlinePolling();
-    showScreen('welcome');
+    leaveCallToWelcome();
   }
 }
+
+/* ── WS lifecycle + reconnect ────────────────────── */
 
 function connectSignaling(url) {
   return new Promise((resolve, reject) => {
@@ -1492,6 +1774,8 @@ function connectSignaling(url) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      state.wsLastMsg = Date.now();
+      startWsHeartbeatWatchdog();
       resolve();
     };
     ws.onerror = (ev) => {
@@ -1502,9 +1786,92 @@ function connectSignaling(url) {
         reject(new Error('Failed to reach signaling server'));
       }
     };
-    ws.onclose = () => {};
+    ws.onclose = () => {
+      stopWsHeartbeatWatchdog();
+      if (state.intendedRoom) {
+        showReconnectPill('reconnecting…');
+        scheduleReconnect();
+      } else if (state.currentScreen === 'welcome') {
+        state.signaling = null;
+        scheduleReconnect();
+      }
+    };
     ws.onmessage = (ev) => handleSignalingMessage(ev.data);
   });
+}
+
+function startWsHeartbeatWatchdog() {
+  stopWsHeartbeatWatchdog();
+  state.wsHeartbeatTimer = setInterval(() => {
+    if (!state.signaling || state.signaling.readyState !== WebSocket.OPEN) {
+      stopWsHeartbeatWatchdog();
+      return;
+    }
+    if (Date.now() - state.wsLastMsg > HEARTBEAT_CLIENT_TIMEOUT_MS) {
+      console.warn('[renderer] heartbeat silent — forcing reconnect');
+      try { state.signaling.close(); } catch {}
+    }
+  }, 10_000);
+}
+
+function stopWsHeartbeatWatchdog() {
+  if (state.wsHeartbeatTimer) {
+    clearInterval(state.wsHeartbeatTimer);
+    state.wsHeartbeatTimer = 0;
+  }
+}
+
+function scheduleReconnect() {
+  if (state.reconnectTimer) return;
+  const attempt = state.reconnectAttempt;
+  const delay = RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)];
+  state.reconnectAttempt = attempt + 1;
+  console.log(`[renderer] reconnect scheduled in ${delay}ms (attempt ${attempt + 1})`);
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = 0;
+    doReconnect();
+  }, delay);
+}
+
+async function doReconnect() {
+  if (state.intendedRoom) {
+    // mid-call reconnect: re-establish signaling + rejoin
+    try {
+      // tear down existing peer connections; they will be re-negotiated after rejoin
+      for (const id of Object.keys(state.peerConnections)) cleanupPeer(id);
+      await connectSignaling(state.signalingUrl);
+      const join = { type: 'join', room: state.intendedRoom };
+      if (state.auth && state.auth.token) join.token = state.auth.token;
+      else join.name = 'guest';
+      sendSignal(join);
+      hideReconnectPill();
+    } catch (err) {
+      console.warn('[renderer] reconnect failed:', err.message);
+      showReconnectPill('reconnecting…');
+      scheduleReconnect();
+    }
+  } else if (state.currentScreen === 'welcome' && state.signalingUrl) {
+    // welcome-screen watch reconnect
+    startWatchChannel();
+  }
+}
+
+function showReconnectPill(text) {
+  if (!els.reconnectPill) return;
+  els.reconnectPillText.textContent = text || 'reconnecting…';
+  els.reconnectPill.classList.remove('hidden');
+}
+
+function hideReconnectPill() {
+  if (!els.reconnectPill) return;
+  els.reconnectPill.classList.add('hidden');
+}
+
+function leaveCallToWelcome() {
+  state.intendedRoom = '';
+  disconnectAll();
+  startOnlinePolling();
+  showScreen('welcome');
 }
 
 function disconnectAll() {
@@ -1513,6 +1880,14 @@ function disconnectAll() {
     try { state.signaling.close(); } catch {}
     state.signaling = null;
   }
+  stopWsHeartbeatWatchdog();
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = 0;
+  }
+  state.reconnectAttempt = 0;
+  state.watching = false;
+  hideReconnectPill();
   stopMicMeter();
   if (state.localStream) {
     for (const t of state.localStream.getTracks()) t.stop();
@@ -1523,7 +1898,9 @@ function disconnectAll() {
   state.peerNames = {};
   state.peerAuthed = {};
   state.dataChannels = {};
+  state.iceRestartCount = {};
   state.isMuted = false;
+  state.pttHeld = false;
   setMuteButton(false);
   renderPeersList();
   clearChatHistory();
@@ -1532,6 +1909,7 @@ function disconnectAll() {
 function setMuteButton(muted) {
   els.btnMute.querySelector('.btn-label').textContent = muted ? 'Unmute' : 'Mute';
   els.btnMute.setAttribute('aria-pressed', String(muted));
+  els.btnMute.classList.toggle('is-muted', muted);
 }
 
 function setMuted(muted) {
@@ -1561,6 +1939,26 @@ async function fetchIceServers() {
   }
 }
 
+/* ── Mic popover ─────────────────────────────────── */
+
+function openMicPopover() {
+  if (!els.micPopover) return;
+  state.micPopoverOpen = true;
+  els.micPopover.dataset.open = 'true';
+  els.btnMicPopover.setAttribute('aria-expanded', 'true');
+}
+
+function closeMicPopover() {
+  if (!els.micPopover) return;
+  state.micPopoverOpen = false;
+  els.micPopover.dataset.open = 'false';
+  els.btnMicPopover.setAttribute('aria-expanded', 'false');
+}
+
+function toggleMicPopover() {
+  if (state.micPopoverOpen) closeMicPopover(); else openMicPopover();
+}
+
 /* ── Room join orchestration ─────────────────────── */
 
 function requestJoinRoom(roomCode) {
@@ -1576,7 +1974,7 @@ function requestJoinRoom(roomCode) {
     showError(els.roomFormError, 'Use letters, numbers, _ or - (1–32 chars).');
     return;
   }
-  if (room !== 'lobby' && !state.auth) {
+  if (room !== 'lobby' && (!state.auth || !state.auth.user)) {
     showError(els.roomFormError, 'Sign in to join named rooms.');
     return;
   }
@@ -1595,7 +1993,16 @@ async function doConnect(room) {
     return;
   }
   closeDrawer();
+  stopOnlinePolling();
+  state.intendedRoom = room;
   toast('Connecting…');
+
+  // close any existing watch socket
+  if (state.signaling) {
+    try { state.signaling.close(); } catch {}
+    state.signaling = null;
+    state.watching = false;
+  }
 
   try {
     await getMicStream();
@@ -1603,7 +2010,7 @@ async function doConnect(room) {
     state.iceServers = await fetchIceServers();
     await connectSignaling(state.signalingUrl);
     const join = { type: 'join', room };
-    if (state.auth) {
+    if (state.auth && state.auth.token) {
       join.token = state.auth.token;
     } else {
       join.name = 'guest';
@@ -1612,7 +2019,10 @@ async function doConnect(room) {
     showScreen('call');
   } catch (err) {
     console.error('[renderer] connect failed:', err);
-    toast(err.message || 'Connect failed', 3500);
+    state.intendedRoom = '';
+    if (err.message !== 'Microphone unavailable') {
+      toast(err.message || 'Connect failed', 3500);
+    }
     disconnectAll();
     startOnlinePolling();
   }
@@ -1631,31 +2041,29 @@ function attachEvents() {
     }
   });
 
-  els.btnStart.addEventListener('click', openDrawer);
+  els.btnStart.addEventListener('click', joinLobby);
   els.btnOpenMenuCorner.addEventListener('click', toggleDrawer);
   els.drawerClose.addEventListener('click', closeDrawer);
   els.drawerScrim.addEventListener('click', closeDrawer);
 
   els.btnSettings.addEventListener('click', () => showScreen('settings'));
   els.btnDrawerSettings.addEventListener('click', () => showScreen('settings'));
-  els.btnProfile.addEventListener('click', () => {
-    if (state.auth) {
+
+  const goProfile = () => {
+    if (state.auth && state.auth.user) {
       renderProfileScreen();
       showScreen('profile');
     } else {
       showScreen('auth');
       switchAuthTab('signin');
     }
+  };
+  els.btnProfile.addEventListener('click', goProfile);
+  els.btnSigninCorner.addEventListener('click', () => {
+    showScreen('auth');
+    switchAuthTab('signin');
   });
-  els.btnDrawerProfile.addEventListener('click', () => {
-    if (state.auth) {
-      renderProfileScreen();
-      showScreen('profile');
-    } else {
-      showScreen('auth');
-      switchAuthTab('signin');
-    }
-  });
+  els.btnDrawerProfile.addEventListener('click', goProfile);
 
   els.btnBackFromSettings.addEventListener('click', () => showScreen('welcome'));
   els.btnBackFromProfile.addEventListener('click', () => showScreen('welcome'));
@@ -1681,13 +2089,13 @@ function attachEvents() {
     ev.preventDefault();
     requestJoinRoom(els.roomInput.value);
   });
-
-  els.btnLeave.addEventListener('click', () => {
-    disconnectAll();
-    startOnlinePolling();
-    showScreen('welcome');
-    toast('Left room');
+  els.btnRoomDice.addEventListener('click', () => {
+    if (els.roomInput.disabled) return;
+    els.roomInput.value = generateRoomCode();
+    els.roomInput.focus();
   });
+
+  els.btnLeave.addEventListener('click', leaveCallToWelcome);
 
   els.btnToggleChat.addEventListener('click', toggleChatPanel);
   els.btnCloseChat.addEventListener('click', closeChatPanel);
@@ -1718,6 +2126,12 @@ function attachEvents() {
   els.btnMute.addEventListener('click', () => setMuted(!state.isMuted));
   els.volumeSlider.addEventListener('input', (e) => setVolume(+e.target.value));
 
+  els.btnMicPopover.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    toggleMicPopover();
+  });
+  els.micPopover.addEventListener('click', (ev) => ev.stopPropagation());
+
   els.btnCopyRoom.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(state.myRoom);
@@ -1744,6 +2158,21 @@ function attachEvents() {
     });
   }
 
+  els.btnMicRetry.addEventListener('click', async () => {
+    try {
+      await getMicStream();
+      startMicMeter();
+      if (state.intendedRoom) {
+        toast('Mic back online');
+      }
+    } catch {}
+  });
+  els.btnMicOpenSettings.addEventListener('click', () => {
+    if (window.api && typeof window.api.openMicSettings === 'function') {
+      window.api.openMicSettings();
+    }
+  });
+
   els.eeDot.addEventListener('click', (ev) => {
     ev.stopPropagation();
     toggleEe();
@@ -1752,14 +2181,31 @@ function attachEvents() {
     if (els.eePanel.dataset.open === 'true' && !els.eePanel.contains(ev.target)) {
       els.eePanel.dataset.open = 'false';
     }
+    if (state.micPopoverOpen && !els.micPopover.contains(ev.target) && ev.target !== els.btnMicPopover) {
+      closeMicPopover();
+    }
   });
 
   document.addEventListener('keydown', (ev) => {
+    // Push-to-talk: hold Space when in call + not typing → unmute temporarily
+    if (ev.code === 'Space' && !ev.repeat && state.currentScreen === 'call') {
+      const active = document.activeElement;
+      const typing = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+      if (!typing && !state.pttHeld && state.isMuted) {
+        state.pttHeld = true;
+        state.pttPrevMute = true;
+        setMuted(false);
+        ev.preventDefault();
+        return;
+      }
+    }
+
     if (ev.key === 'Escape') {
       if (els.eePanel.dataset.open === 'true') {
         els.eePanel.dataset.open = 'false';
         return;
       }
+      if (state.micPopoverOpen) { closeMicPopover(); return; }
       if (state.drawerOpen) { closeDrawer(); return; }
       if (state.currentScreen === 'settings' || state.currentScreen === 'profile' || state.currentScreen === 'auth') {
         showScreen('welcome');
@@ -1767,6 +2213,21 @@ function attachEvents() {
     }
     if (ev.key === 'Enter' && state.currentScreen === 'loading' && state.loadingReady) {
       leaveLoading();
+    }
+  });
+
+  document.addEventListener('keyup', (ev) => {
+    if (ev.code === 'Space' && state.pttHeld) {
+      state.pttHeld = false;
+      if (state.pttPrevMute) setMuted(true);
+    }
+  });
+
+  // Blur cancels PTT to avoid getting stuck unmuted
+  window.addEventListener('blur', () => {
+    if (state.pttHeld) {
+      state.pttHeld = false;
+      if (state.pttPrevMute) setMuted(true);
     }
   });
 }

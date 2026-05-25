@@ -6,11 +6,12 @@
     <title>BroTalk</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter:wght@300..600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..600;1,9..144,300..600&family=Inter:wght@300..600&family=Inter+Tight:wght@300..600&family=Cormorant:ital,wght@0,300..600;1,300..600&family=Playfair+Display:ital,wght@0,400..700;1,400..700&family=Lora:ital,wght@0,400..600;1,400..600&family=Libre+Caslon+Text:ital,wght@0,400..700;1,400..700&family=Space+Grotesk:wght@400..700&family=Space+Mono:ital,wght@0,400..700;1,400..700&family=B612+Mono:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="theme-ashy" data-screen="loading">
     <div class="atmosphere" aria-hidden="true"></div>
+    <div class="texture-overlay" aria-hidden="true"></div>
 
     <main class="stage">
       <!-- Loading screen -->
@@ -38,7 +39,8 @@
         </header>
         <header class="welcome-corner welcome-corner-right">
           <button id="btn-settings" class="btn ghost" title="Settings">settings</button>
-          <button id="btn-profile" class="profile-chip" title="Account">
+          <button id="btn-signin-corner" class="btn ghost btn-signin-corner hidden" title="Sign in">Sign in</button>
+          <button id="btn-profile" class="profile-chip hidden" title="Account">
             <span class="avatar" id="profile-avatar">?</span>
           </button>
         </header>
@@ -48,13 +50,18 @@
           <p class="welcome-line" id="welcome-line">ready when you are.</p>
 
           <button id="btn-start" class="btn primary btn-start">
-            <span class="btn-label">Start</span>
+            <span class="btn-label">Join lobby</span>
           </button>
 
           <div class="welcome-meta">
             <span class="status" id="online-status">
               <span class="online-dot"></span>
               <span id="online-count">—</span> online
+            </span>
+            <span class="welcome-meta-sep hidden" id="lobby-count-wrap">·
+              <span class="status status-lobby">
+                <span id="lobby-count">0</span> in lobby
+              </span>
             </span>
           </div>
         </div>
@@ -97,6 +104,16 @@
               <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
             </div>
 
+            <div id="mic-denied-card" class="mic-denied-card hidden" role="alert">
+              <h3 class="mic-denied-title">Microphone access needed</h3>
+              <p class="mic-denied-body">BroTalk uses your microphone for voice chat. Without it, no one can hear you.</p>
+              <div id="mic-denied-instructions" class="mic-denied-instructions"></div>
+              <div class="mic-denied-actions">
+                <button id="btn-mic-open-settings" class="btn primary hidden">Open settings</button>
+                <button id="btn-mic-retry" class="btn">Try again</button>
+              </div>
+            </div>
+
             <div id="call-error" class="error hidden"></div>
           </div>
 
@@ -121,18 +138,29 @@
         </div>
 
         <footer class="conv-footer">
-          <button id="btn-mute" class="btn" aria-pressed="false">
+          <button id="btn-mute" class="btn btn-mute" aria-pressed="false" title="Mute / unmute (hold space when muted = push-to-talk)">
             <span class="btn-label">Mute</span>
           </button>
           <div class="volume-control">
             <span class="field-label">volume</span>
             <input id="volume-slider" type="range" min="0" max="100" value="100" />
           </div>
-          <label class="control-mic">
-            <span class="field-label">mic</span>
-            <select id="call-mic-select" class="field-input field-input-sm"></select>
-          </label>
+          <div class="mic-popover-wrap">
+            <button id="btn-mic-popover" class="btn btn-mic-popover" aria-expanded="false" aria-haspopup="true" title="Microphone device">
+              <span class="mic-popover-glyph" aria-hidden="true">🎙</span>
+              <span class="btn-label">mic</span>
+            </button>
+            <div id="mic-popover" class="mic-popover" data-open="false" role="dialog">
+              <span class="field-label">microphone device</span>
+              <select id="call-mic-select" class="field-input field-input-sm"></select>
+            </div>
+          </div>
         </footer>
+
+        <div id="reconnect-pill" class="reconnect-pill hidden" role="status">
+          <span class="reconnect-spinner" aria-hidden="true"></span>
+          <span id="reconnect-pill-text">reconnecting…</span>
+        </div>
       </section>
 
       <!-- Settings screen -->
@@ -148,7 +176,8 @@
         <div class="scroll-area scroll-area-narrow">
           <div class="settings-block">
             <div class="section-title">theme</div>
-            <div class="theme-grid">
+            <div id="theme-grid" class="theme-grid">
+
               <label class="theme-swatch" data-theme="ashy">
                 <input type="radio" name="theme" value="ashy" />
                 <span class="theme-preview theme-preview-ashy" aria-hidden="true">
@@ -158,7 +187,7 @@
                 </span>
                 <div class="theme-swatch-info">
                   <div class="theme-swatch-name">Ashy Smoke</div>
-                  <div class="theme-swatch-sub">warm dark · champagne accent · serif voice</div>
+                  <div class="theme-swatch-sub">warm dark · champagne · serif voice</div>
                 </div>
               </label>
 
@@ -174,6 +203,137 @@
                   <div class="theme-swatch-sub">near-black · green glow · classic BroTalk</div>
                 </div>
               </label>
+
+              <label class="theme-swatch" data-theme="midnight">
+                <input type="radio" name="theme" value="midnight" />
+                <span class="theme-preview theme-preview-midnight" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#d4a557; box-shadow:0 0 8px rgba(212,165,87,0.5)"></span>
+                  <span class="theme-preview-line" style="background:#f0e6d2"></span>
+                  <span class="theme-preview-line" style="background:#8a8270; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Midnight Library</div>
+                  <div class="theme-swatch-sub">deep navy · warm amber · old-world reading nook</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="cyber">
+                <input type="radio" name="theme" value="cyber" />
+                <span class="theme-preview theme-preview-cyber" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#ff2d92; box-shadow:0 0 10px rgba(255,45,146,0.7)"></span>
+                  <span class="theme-preview-line" style="background:#00f0ff"></span>
+                  <span class="theme-preview-line" style="background:#a560c0; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Cyber Synth</div>
+                  <div class="theme-swatch-sub">jet · hot pink · cyan · scanlines · 80s wave</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="sakura">
+                <input type="radio" name="theme" value="sakura" />
+                <span class="theme-preview theme-preview-sakura" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#e8a5a0"></span>
+                  <span class="theme-preview-line" style="background:#5a6a4a"></span>
+                  <span class="theme-preview-line" style="background:#8a9a7a; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Sakura Mist <span class="theme-swatch-tag">light</span></div>
+                  <div class="theme-swatch-sub">cream · blush · sage · washi paper</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="brutalist">
+                <input type="radio" name="theme" value="brutalist" />
+                <span class="theme-preview theme-preview-brutalist" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#ffd400"></span>
+                  <span class="theme-preview-line" style="background:#f0f0f0"></span>
+                  <span class="theme-preview-line" style="background:#909090; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Brutalist Concrete</div>
+                  <div class="theme-swatch-sub">slate · sodium yellow · heavy sans · grit</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="velvet">
+                <input type="radio" name="theme" value="velvet" />
+                <span class="theme-preview theme-preview-velvet" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#c9a961; box-shadow:0 0 8px rgba(201,169,97,0.4)"></span>
+                  <span class="theme-preview-line" style="background:#e8dcc0"></span>
+                  <span class="theme-preview-line" style="background:#9a8870; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Royal Velvet</div>
+                  <div class="theme-swatch-sub">aubergine · antique gold · damask · bourbon bar</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="ocean">
+                <input type="radio" name="theme" value="ocean" />
+                <span class="theme-preview theme-preview-ocean" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#5af6d4; box-shadow:0 0 10px rgba(90,246,212,0.6)"></span>
+                  <span class="theme-preview-line" style="background:#c0e8f0"></span>
+                  <span class="theme-preview-line" style="background:#5a8aa0; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Ocean Depths</div>
+                  <div class="theme-swatch-sub">abyss · bioluminescent cyan · animated caustics</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="terracotta">
+                <input type="radio" name="theme" value="terracotta" />
+                <span class="theme-preview theme-preview-terracotta" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#b85838"></span>
+                  <span class="theme-preview-line" style="background:#3a2a1a"></span>
+                  <span class="theme-preview-line" style="background:#6a5a4a; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Terracotta <span class="theme-swatch-tag">light</span></div>
+                  <div class="theme-swatch-sub">clay · burnt sienna · stucco · mediterranean</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="vapor">
+                <input type="radio" name="theme" value="vapor" />
+                <span class="theme-preview theme-preview-vapor" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#ff9ecf; box-shadow:0 0 10px rgba(255,158,207,0.7)"></span>
+                  <span class="theme-preview-line" style="background:#a8f0d8"></span>
+                  <span class="theme-preview-line" style="background:#9080b0; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Vaporwave Mall</div>
+                  <div class="theme-swatch-sub">purple · pastel pink · mint · grid bg</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="noir">
+                <input type="radio" name="theme" value="noir" />
+                <span class="theme-preview theme-preview-noir" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:#a8261d"></span>
+                  <span class="theme-preview-line" style="background:#1a1a1a"></span>
+                  <span class="theme-preview-line" style="background:#666666; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Paperback Noir <span class="theme-swatch-tag">light</span></div>
+                  <div class="theme-swatch-sub">cream · jet · crimson · pulp novel print</div>
+                </div>
+              </label>
+
+              <label class="theme-swatch" data-theme="aurora">
+                <input type="radio" name="theme" value="aurora" />
+                <span class="theme-preview theme-preview-aurora" aria-hidden="true">
+                  <span class="theme-preview-dot" style="background:linear-gradient(135deg,#9d4edd 0%,#5af6d4 50%,#80ff80 100%); box-shadow:0 0 10px rgba(157,78,221,0.5)"></span>
+                  <span class="theme-preview-line" style="background:#e0e8f0"></span>
+                  <span class="theme-preview-line" style="background:#6a7080; width:60%"></span>
+                </span>
+                <div class="theme-swatch-info">
+                  <div class="theme-swatch-name">Aurora</div>
+                  <div class="theme-swatch-sub">black · animated purple→teal→lime · sky show</div>
+                </div>
+              </label>
+
             </div>
           </div>
 
@@ -184,6 +344,11 @@
               <select id="mic-select" class="field-input"></select>
             </label>
             <button id="btn-refresh-mics" class="btn ghost">refresh devices</button>
+          </div>
+
+          <div class="settings-block">
+            <div class="section-title">tips</div>
+            <p class="settings-tip">hold <kbd>space</kbd> in a call while muted to push-to-talk.</p>
           </div>
 
           <div class="settings-block">
@@ -289,6 +454,7 @@
           <span class="field-label" id="named-room-desc">private room — pick a code</span>
           <div class="drawer-form-row">
             <input id="room-input" class="field-input" type="text" maxlength="32" placeholder="room code" autocomplete="off" />
+            <button id="btn-room-dice" type="button" class="btn btn-dice" title="Generate a random code">⚄</button>
             <button type="submit" class="btn primary">enter</button>
           </div>
           <div id="room-form-error" class="error hidden"></div>
