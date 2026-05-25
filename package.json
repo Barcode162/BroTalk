@@ -1,7 +1,7 @@
 {
   "name": "brotalk",
   "productName": "BroTalk",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Peer-to-peer voice chat for friends and family",
   "main": "main.js",
   "type": "commonjs",

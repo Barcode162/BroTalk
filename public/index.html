@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data: blob:;" />
     <title>BroTalk</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -68,29 +68,56 @@
             <span class="conv-eyebrow">room</span>
             <code id="room-display">lobby</code>
           </div>
-          <button id="btn-copy-room" class="btn ghost" title="Copy room code">copy</button>
+          <div class="conv-actions">
+            <button id="btn-toggle-chat" class="btn ghost btn-chat-toggle" title="Open chat" aria-pressed="false">
+              <span class="btn-label">chat</span>
+              <span id="chat-unread" class="chat-unread hidden">0</span>
+            </button>
+            <button id="btn-copy-room" class="btn ghost" title="Copy room code">copy</button>
+          </div>
         </header>
 
-        <div class="scroll-area">
-          <div class="self-block">
-            <div class="self-head">
-              <span class="avatar avatar-lg" id="self-avatar">?</span>
-              <div class="self-info">
-                <span class="self-name" id="self-name">—</span>
-                <span class="status" id="self-role">you</span>
+        <div class="call-body">
+          <div class="scroll-area">
+            <div class="self-block">
+              <div class="self-head">
+                <span class="avatar avatar-lg" id="self-avatar">?</span>
+                <div class="self-info">
+                  <span class="self-name" id="self-name">—</span>
+                  <span class="status" id="self-role">you</span>
+                </div>
+              </div>
+              <div class="mic-meter" title="Your microphone level">
+                <div class="mic-meter-fill" id="mic-fill"></div>
               </div>
             </div>
-            <div class="mic-meter" title="Your microphone level">
-              <div class="mic-meter-fill" id="mic-fill"></div>
+
+            <div class="peers-block">
+              <div class="section-title">connected</div>
+              <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
             </div>
+
+            <div id="call-error" class="error hidden"></div>
           </div>
 
-          <div class="peers-block">
-            <div class="section-title">connected</div>
-            <ul id="peers-list" class="peers-list" aria-label="Connected peers"></ul>
-          </div>
-
-          <div id="call-error" class="error hidden"></div>
+          <aside id="chat-panel" class="chat-panel" data-open="false" aria-label="Chat">
+            <header class="chat-panel-header">
+              <span class="conv-eyebrow">room chat</span>
+              <button id="btn-close-chat" class="btn ghost btn-chat-close" title="Close chat">×</button>
+            </header>
+            <div id="chat-empty" class="chat-empty">
+              <p class="chat-empty-line">say something. files stay peer-to-peer.</p>
+            </div>
+            <ul id="chat-messages" class="chat-messages" aria-live="polite"></ul>
+            <form id="chat-form" class="chat-form" autocomplete="off">
+              <label for="chat-file" class="chat-attach" title="Attach a file">
+                <span aria-hidden="true">＋</span>
+                <input id="chat-file" type="file" multiple hidden />
+              </label>
+              <input id="chat-input" class="chat-input" type="text" maxlength="2000" placeholder="message the room…" />
+              <button id="btn-chat-send" type="submit" class="btn primary btn-chat-send" disabled>send</button>
+            </form>
+          </aside>
         </div>
 
         <footer class="conv-footer">

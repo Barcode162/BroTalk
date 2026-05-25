@@ -42,6 +42,8 @@ const state = {
   appVersion: '',
   localStream: null,
   peerConnections: {},
+  dataChannels: {},
+  incomingFiles: {},
   remoteAudios: {},
   peerNames: {},
   peerAuthed: {},
@@ -69,7 +71,17 @@ const state = {
   loadingReady: false,
   drawerOpen: false,
   eeLineIdx: 0,
+  chatOpen: false,
+  chatMessages: [],
+  chatBlobUrls: [],
+  chatUnread: 0,
+  chatComposerHasText: false,
+  chatSendQueue: Promise.resolve(),
 };
+
+const CHAT_CHUNK_SIZE = 16 * 1024;
+const CHAT_BUFFER_HIGH = 16 * 1024 * 1024;
+const CHAT_BUFFER_LOW  = 1 * 1024 * 1024;
 
 const ONLINE_POLL_MS = 15000;
 
@@ -107,6 +119,8 @@ function bindEls() {
     'btn-drawer-settings',
     'ee-dot', 'ee-panel', 'ee-poem',
     'peers-list', 'remote-audios', 'toast',
+    'btn-toggle-chat', 'chat-unread', 'chat-panel', 'btn-close-chat',
+    'chat-empty', 'chat-messages', 'chat-form', 'chat-file', 'chat-input', 'btn-chat-send',
   ];
   for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
@@ -770,6 +784,17 @@ function createPeerConnection(peerId, isInitiator) {
     }
   }
 
+  if (isInitiator) {
+    const dc = pc.createDataChannel('chat', { ordered: true });
+    setupDataChannel(dc, peerId);
+  } else {
+    pc.ondatachannel = (ev) => {
+      if (ev.channel && ev.channel.label === 'chat') {
+        setupDataChannel(ev.channel, peerId);
+      }
+    };
+  }
+
   pc.onicecandidate = (ev) => {
     if (ev.candidate) sendSignal({ type: 'ice', to: peerId, candidate: ev.candidate });
   };
@@ -824,6 +849,12 @@ async function flushPendingIce(pc) {
 }
 
 function cleanupPeer(peerId) {
+  const dc = state.dataChannels[peerId];
+  if (dc) {
+    try { dc.close(); } catch {}
+    delete state.dataChannels[peerId];
+  }
+  delete state.incomingFiles[peerId];
   const pc = state.peerConnections[peerId];
   if (pc) {
     try { pc.close(); } catch {}
@@ -836,6 +867,506 @@ function cleanupPeer(peerId) {
     delete state.remoteAudios[peerId];
   }
   renderPeersList();
+}
+
+/* ── Chat (DataChannel mesh) ─────────────────────── */
+
+function setupDataChannel(dc, peerId) {
+  dc.binaryType = 'arraybuffer';
+  dc.bufferedAmountLowThreshold = CHAT_BUFFER_LOW;
+  state.dataChannels[peerId] = dc;
+
+  dc.onopen = () => {
+    console.log(`[renderer] chat channel open with ${peerId.slice(0, 6)}`);
+  };
+  dc.onclose = () => {
+    if (state.dataChannels[peerId] === dc) delete state.dataChannels[peerId];
+    delete state.incomingFiles[peerId];
+  };
+  dc.onerror = (err) => {
+    console.warn(`[renderer] chat channel error with ${peerId.slice(0, 6)}:`, err);
+  };
+  dc.onmessage = (ev) => handleChatWireMessage(peerId, ev.data);
+}
+
+function handleChatWireMessage(peerId, data) {
+  if (typeof data === 'string') {
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    if (msg.type === 'text') {
+      receiveText(peerId, msg);
+    } else if (msg.type === 'file-start') {
+      receiveFileStart(peerId, msg);
+    } else if (msg.type === 'file-end') {
+      receiveFileEnd(peerId, msg);
+    } else if (msg.type === 'file-abort') {
+      delete state.incomingFiles[peerId];
+    }
+    return;
+  }
+  receiveFileChunk(peerId, data);
+}
+
+function receiveText(peerId, msg) {
+  const text = String(msg.text || '').slice(0, 4000);
+  if (!text) return;
+  appendChatMessage({
+    id: String(msg.id || crypto.randomUUID()),
+    from: peerId,
+    name: String(msg.name || state.peerNames[peerId] || 'peer').slice(0, 24),
+    kind: 'text',
+    text,
+    ts: Number(msg.ts) || Date.now(),
+    mine: false,
+  });
+}
+
+function receiveFileStart(peerId, msg) {
+  const size = Number(msg.fileSize);
+  if (!Number.isFinite(size) || size < 0) return;
+  state.incomingFiles[peerId] = {
+    id: String(msg.id || crypto.randomUUID()),
+    name: String(msg.name || state.peerNames[peerId] || 'peer').slice(0, 24),
+    fileName: String(msg.fileName || 'file').slice(0, 200),
+    fileSize: size,
+    mime: String(msg.mime || 'application/octet-stream').slice(0, 120),
+    ts: Number(msg.ts) || Date.now(),
+    chunks: [],
+    received: 0,
+    msgRef: null,
+  };
+
+  const incoming = state.incomingFiles[peerId];
+  const placeholder = {
+    id: incoming.id,
+    from: peerId,
+    name: incoming.name,
+    kind: 'file',
+    fileName: incoming.fileName,
+    fileSize: incoming.fileSize,
+    mime: incoming.mime,
+    ts: incoming.ts,
+    mine: false,
+    progress: 0,
+    blobUrl: null,
+  };
+  appendChatMessage(placeholder);
+  incoming.msgRef = placeholder;
+}
+
+function receiveFileChunk(peerId, buf) {
+  const incoming = state.incomingFiles[peerId];
+  if (!incoming) return;
+  incoming.chunks.push(buf);
+  incoming.received += buf.byteLength;
+  if (incoming.msgRef) {
+    incoming.msgRef.progress = incoming.fileSize ? incoming.received / incoming.fileSize : 0;
+    updateChatProgress(incoming.msgRef);
+  }
+}
+
+function receiveFileEnd(peerId, _msg) {
+  const incoming = state.incomingFiles[peerId];
+  if (!incoming) return;
+  const blob = new Blob(incoming.chunks, { type: incoming.mime });
+  const url = URL.createObjectURL(blob);
+  state.chatBlobUrls.push(url);
+  if (incoming.msgRef) {
+    incoming.msgRef.progress = 1;
+    incoming.msgRef.blobUrl = url;
+    finalizeFileBubble(incoming.msgRef);
+  }
+  delete state.incomingFiles[peerId];
+}
+
+function getOpenChannels() {
+  const open = [];
+  for (const [id, dc] of Object.entries(state.dataChannels)) {
+    if (dc && dc.readyState === 'open') open.push({ id, dc });
+  }
+  return open;
+}
+
+async function waitForBufferLow(dc) {
+  if (dc.bufferedAmount <= CHAT_BUFFER_HIGH) return;
+  await new Promise((resolve) => {
+    const onLow = () => { dc.removeEventListener('bufferedamountlow', onLow); resolve(); };
+    dc.addEventListener('bufferedamountlow', onLow);
+    setTimeout(() => {
+      dc.removeEventListener('bufferedamountlow', onLow);
+      resolve();
+    }, 5000);
+  });
+}
+
+function sendChatText(text) {
+  const trimmed = String(text || '').trim().slice(0, 2000);
+  if (!trimmed) return;
+  const channels = getOpenChannels();
+  const msg = {
+    type: 'text',
+    id: crypto.randomUUID(),
+    name: state.myName || 'you',
+    text: trimmed,
+    ts: Date.now(),
+  };
+  const wire = JSON.stringify(msg);
+  let delivered = 0;
+  for (const { dc } of channels) {
+    try { dc.send(wire); delivered++; } catch (err) {
+      console.warn('[renderer] chat send failed:', err);
+    }
+  }
+  appendChatMessage({
+    id: msg.id,
+    from: state.myPeerId,
+    name: msg.name,
+    kind: 'text',
+    text: msg.text,
+    ts: msg.ts,
+    mine: true,
+    delivered,
+    peerCount: channels.length,
+  });
+}
+
+async function sendChatFile(file) {
+  if (!file) return;
+  const channels = getOpenChannels();
+  if (channels.length === 0) {
+    toast('No peers to send to yet.', 2400);
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const meta = {
+    type: 'file-start',
+    id,
+    name: state.myName || 'you',
+    fileName: file.name || 'file',
+    fileSize: file.size,
+    mime: file.type || 'application/octet-stream',
+    ts: Date.now(),
+  };
+
+  const mineMsg = {
+    id,
+    from: state.myPeerId,
+    name: meta.name,
+    kind: 'file',
+    fileName: meta.fileName,
+    fileSize: meta.fileSize,
+    mime: meta.mime,
+    ts: meta.ts,
+    mine: true,
+    progress: 0,
+    blobUrl: URL.createObjectURL(file),
+    sending: true,
+  };
+  state.chatBlobUrls.push(mineMsg.blobUrl);
+  appendChatMessage(mineMsg);
+
+  const metaWire = JSON.stringify(meta);
+  for (const { dc } of channels) {
+    try { dc.send(metaWire); } catch (err) {
+      console.warn('[renderer] file-start send failed:', err);
+    }
+  }
+
+  let sent = 0;
+  const total = file.size;
+  for (let offset = 0; offset < total; offset += CHAT_CHUNK_SIZE) {
+    const slice = file.slice(offset, Math.min(offset + CHAT_CHUNK_SIZE, total));
+    const buf = await slice.arrayBuffer();
+    for (const { dc } of channels) {
+      if (dc.readyState !== 'open') continue;
+      try { dc.send(buf); } catch (err) {
+        console.warn('[renderer] chunk send failed:', err);
+      }
+      if (dc.bufferedAmount > CHAT_BUFFER_HIGH) await waitForBufferLow(dc);
+    }
+    sent += buf.byteLength;
+    mineMsg.progress = total ? sent / total : 1;
+    updateChatProgress(mineMsg);
+  }
+
+  const endWire = JSON.stringify({ type: 'file-end', id, ts: Date.now() });
+  for (const { dc } of channels) {
+    if (dc.readyState !== 'open') continue;
+    try { dc.send(endWire); } catch {}
+  }
+  mineMsg.progress = 1;
+  mineMsg.sending = false;
+  finalizeFileBubble(mineMsg);
+}
+
+/* ── Chat UI render ──────────────────────────────── */
+
+function openChatPanel() {
+  state.chatOpen = true;
+  state.chatUnread = 0;
+  els.chatPanel.dataset.open = 'true';
+  els.btnToggleChat.setAttribute('aria-pressed', 'true');
+  renderChatUnread();
+  requestAnimationFrame(() => {
+    els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+    els.chatInput.focus();
+  });
+}
+
+function closeChatPanel() {
+  state.chatOpen = false;
+  els.chatPanel.dataset.open = 'false';
+  els.btnToggleChat.setAttribute('aria-pressed', 'false');
+}
+
+function toggleChatPanel() {
+  if (state.chatOpen) closeChatPanel(); else openChatPanel();
+}
+
+function renderChatUnread() {
+  if (!els.chatUnread) return;
+  if (state.chatUnread > 0) {
+    els.chatUnread.textContent = state.chatUnread > 99 ? '99+' : String(state.chatUnread);
+    els.chatUnread.classList.remove('hidden');
+  } else {
+    els.chatUnread.classList.add('hidden');
+  }
+}
+
+function ensureChatEmptyHidden() {
+  if (state.chatMessages.length > 0) {
+    els.chatEmpty.classList.add('hidden');
+  } else {
+    els.chatEmpty.classList.remove('hidden');
+  }
+}
+
+function appendChatMessage(msg) {
+  state.chatMessages.push(msg);
+  const li = document.createElement('li');
+  li.className = 'chat-msg' + (msg.mine ? ' is-mine' : '');
+  li.dataset.msgId = msg.id;
+
+  const head = document.createElement('div');
+  head.className = 'chat-msg-head';
+  const who = document.createElement('span');
+  who.className = 'chat-msg-name';
+  who.textContent = msg.mine ? 'you' : (msg.name || 'peer');
+  const when = document.createElement('span');
+  when.className = 'chat-msg-time';
+  when.textContent = formatChatTime(msg.ts);
+  head.appendChild(who);
+  head.appendChild(when);
+  li.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'chat-msg-body';
+  if (msg.kind === 'text') {
+    body.classList.add('chat-msg-body-text');
+    renderLinkedText(body, msg.text);
+  } else if (msg.kind === 'file') {
+    renderFileBubble(body, msg);
+  }
+  li.appendChild(body);
+  els.chatMessages.appendChild(li);
+
+  ensureChatEmptyHidden();
+  const nearBottom = els.chatMessages.scrollHeight - els.chatMessages.scrollTop - els.chatMessages.clientHeight < 80;
+  if (msg.mine || nearBottom || state.chatOpen) {
+    els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+  }
+  if (!msg.mine && !state.chatOpen) {
+    state.chatUnread++;
+    renderChatUnread();
+  }
+}
+
+function renderLinkedText(node, text) {
+  const re = /(https?:\/\/[^\s<]+)/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = document.createElement('a');
+    a.href = m[1];
+    a.textContent = m[1];
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    node.appendChild(a);
+    last = m.index + m[1].length;
+  }
+  if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function renderFileBubble(body, msg) {
+  body.classList.add('chat-msg-body-file');
+  const card = document.createElement('div');
+  card.className = 'chat-file-card';
+  card.dataset.msgId = msg.id;
+
+  const preview = document.createElement('div');
+  preview.className = 'chat-file-preview';
+  preview.dataset.role = 'preview';
+  card.appendChild(preview);
+
+  const info = document.createElement('div');
+  info.className = 'chat-file-info';
+  const fname = document.createElement('div');
+  fname.className = 'chat-file-name';
+  fname.textContent = msg.fileName;
+  const meta = document.createElement('div');
+  meta.className = 'chat-file-meta';
+  meta.dataset.role = 'meta';
+  meta.textContent = formatBytes(msg.fileSize);
+  info.appendChild(fname);
+  info.appendChild(meta);
+  card.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'chat-file-actions';
+  actions.dataset.role = 'actions';
+  card.appendChild(actions);
+
+  const bar = document.createElement('div');
+  bar.className = 'chat-file-progress';
+  bar.dataset.role = 'bar';
+  const fill = document.createElement('div');
+  fill.className = 'chat-file-progress-fill';
+  fill.style.width = '0%';
+  bar.appendChild(fill);
+  card.appendChild(bar);
+
+  body.appendChild(card);
+
+  if (msg.blobUrl) renderFilePreview(msg);
+  if (msg.progress >= 1) finalizeFileBubble(msg);
+  else updateChatProgress(msg);
+}
+
+function renderFilePreview(msg) {
+  const card = findCardForMessage(msg.id);
+  if (!card) return;
+  const preview = card.querySelector('[data-role="preview"]');
+  if (!preview || preview.childElementCount > 0) return;
+  if (msg.mime.startsWith('image/')) {
+    const img = document.createElement('img');
+    img.src = msg.blobUrl;
+    img.alt = msg.fileName;
+    img.loading = 'lazy';
+    img.addEventListener('click', () => openLightbox(msg));
+    preview.appendChild(img);
+  } else if (msg.mime.startsWith('video/')) {
+    const video = document.createElement('video');
+    video.src = msg.blobUrl;
+    video.controls = true;
+    video.preload = 'metadata';
+    preview.appendChild(video);
+  } else if (msg.mime.startsWith('audio/')) {
+    const audio = document.createElement('audio');
+    audio.src = msg.blobUrl;
+    audio.controls = true;
+    audio.preload = 'metadata';
+    preview.appendChild(audio);
+  } else {
+    preview.classList.add('chat-file-preview-generic');
+    preview.textContent = fileGlyph(msg.mime);
+  }
+}
+
+function findCardForMessage(msgId) {
+  return els.chatMessages.querySelector(`.chat-file-card[data-msg-id="${cssEscape(msgId)}"]`);
+}
+
+function cssEscape(s) {
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, (c) => '\\' + c);
+}
+
+function updateChatProgress(msg) {
+  const card = findCardForMessage(msg.id);
+  if (!card) return;
+  const fill = card.querySelector('.chat-file-progress-fill');
+  if (fill) fill.style.width = Math.min(100, Math.round((msg.progress || 0) * 100)) + '%';
+  const meta = card.querySelector('[data-role="meta"]');
+  if (meta) {
+    const sentBytes = Math.floor((msg.progress || 0) * msg.fileSize);
+    meta.textContent = `${formatBytes(sentBytes)} / ${formatBytes(msg.fileSize)}`;
+  }
+}
+
+function finalizeFileBubble(msg) {
+  const card = findCardForMessage(msg.id);
+  if (!card) return;
+
+  const bar = card.querySelector('[data-role="bar"]');
+  if (bar) bar.remove();
+  const meta = card.querySelector('[data-role="meta"]');
+  if (meta) meta.textContent = formatBytes(msg.fileSize);
+
+  if (msg.blobUrl) renderFilePreview(msg);
+
+  const actions = card.querySelector('[data-role="actions"]');
+  if (actions && msg.blobUrl && actions.childElementCount === 0) {
+    const dl = document.createElement('a');
+    dl.href = msg.blobUrl;
+    dl.download = msg.fileName;
+    dl.className = 'btn ghost btn-sm';
+    dl.textContent = 'save';
+    actions.appendChild(dl);
+  }
+}
+
+function openLightbox(msg) {
+  const existing = document.getElementById('chat-lightbox');
+  if (existing) existing.remove();
+  const wrap = document.createElement('div');
+  wrap.id = 'chat-lightbox';
+  wrap.className = 'chat-lightbox';
+  const img = document.createElement('img');
+  img.src = msg.blobUrl;
+  img.alt = msg.fileName;
+  wrap.appendChild(img);
+  wrap.addEventListener('click', () => wrap.remove());
+  document.body.appendChild(wrap);
+}
+
+function fileGlyph(mime) {
+  if (!mime) return '⎙';
+  if (mime.startsWith('text/')) return '✎';
+  if (mime.includes('pdf')) return '⌘';
+  if (mime.includes('zip') || mime.includes('compress')) return '◫';
+  return '⎙';
+}
+
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatChatTime(ts) {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch { return ''; }
+}
+
+function clearChatHistory() {
+  state.chatMessages = [];
+  state.chatUnread = 0;
+  state.incomingFiles = {};
+  for (const url of state.chatBlobUrls) {
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+  state.chatBlobUrls = [];
+  if (els.chatMessages) els.chatMessages.innerHTML = '';
+  if (els.chatEmpty) els.chatEmpty.classList.remove('hidden');
+  renderChatUnread();
+  closeChatPanel();
+  const lb = document.getElementById('chat-lightbox');
+  if (lb) lb.remove();
 }
 
 function renderPeersList() {
@@ -991,9 +1522,11 @@ function disconnectAll() {
   state.myRoom = '';
   state.peerNames = {};
   state.peerAuthed = {};
+  state.dataChannels = {};
   state.isMuted = false;
   setMuteButton(false);
   renderPeersList();
+  clearChatHistory();
 }
 
 function setMuteButton(muted) {
@@ -1154,6 +1687,32 @@ function attachEvents() {
     startOnlinePolling();
     showScreen('welcome');
     toast('Left room');
+  });
+
+  els.btnToggleChat.addEventListener('click', toggleChatPanel);
+  els.btnCloseChat.addEventListener('click', closeChatPanel);
+  els.chatForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const text = els.chatInput.value;
+    sendChatText(text);
+    els.chatInput.value = '';
+    state.chatComposerHasText = false;
+    els.btnChatSend.disabled = true;
+  });
+  els.chatInput.addEventListener('input', () => {
+    const has = els.chatInput.value.trim().length > 0;
+    state.chatComposerHasText = has;
+    els.btnChatSend.disabled = !has;
+  });
+  els.chatFile.addEventListener('change', () => {
+    const files = Array.from(els.chatFile.files || []);
+    els.chatFile.value = '';
+    for (const f of files) {
+      state.chatSendQueue = state.chatSendQueue.then(() => sendChatFile(f)).catch((err) => {
+        console.error('[renderer] sendChatFile failed:', err);
+        toast('File send failed', 2400);
+      });
+    }
   });
 
   els.btnMute.addEventListener('click', () => setMuted(!state.isMuted));
