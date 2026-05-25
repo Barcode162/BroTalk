@@ -18,10 +18,10 @@ let lastUpdateStatus = { state: 'idle' };
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 880,
-    height: 760,
-    minWidth: 520,
-    minHeight: 600,
+    width: 920,
+    height: 780,
+    minWidth: 680,
+    minHeight: 640,
     title: 'BroTalk',
     autoHideMenuBar: true,
     show: true,
