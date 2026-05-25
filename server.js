@@ -25,6 +25,7 @@ const RESERVED_USERNAMES = new Set(['admin', 'root', 'system', 'brotalk', 'lobby
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_GRACE_MS = 60_000;
 const PRESENCE_TTL_MS = 60_000;
+const SESSION_ID_RE = /^[a-zA-Z0-9_-]{8,64}$/;
 
 let pool = null;
 let dbReady = false;
@@ -263,6 +264,9 @@ const wss = new WebSocketServer({ server: httpServer });
 
 const rooms = new Map();
 const watchers = new Set();
+// sessionId -> { socket, peerId, roomCode } so a reconnect with the same sessionId
+// can immediately boot the previous ghost peer instead of waiting 60s for heartbeat.
+const sessionsById = new Map();
 
 function send(socket, msg) {
   if (socket.readyState === 1) {
@@ -309,6 +313,7 @@ setInterval(broadcastStats, 10_000).unref();
 wss.on('connection', (socket, req) => {
   let peerId = null;
   let roomCode = null;
+  let sessionId = null;
   let watcher = false;
   let lastPong = Date.now();
   const remote = req.socket.remoteAddress;
@@ -378,10 +383,37 @@ wss.on('connection', (socket, req) => {
         name = String(msg.name || '').slice(0, 24).trim() || 'guest';
       }
 
+      // Boot any previous socket for this same sessionId. Reconnects use this to
+      // avoid leaving a ghost peer in the room until the 60s heartbeat times out.
+      const rawSessionId = String(msg.sessionId || '').slice(0, 64);
+      const candidateSessionId = SESSION_ID_RE.test(rawSessionId) ? rawSessionId : null;
+      if (candidateSessionId) {
+        const prev = sessionsById.get(candidateSessionId);
+        if (prev && prev.socket !== socket) {
+          const prevRoom = rooms.get(prev.roomCode);
+          if (prevRoom && prevRoom.has(prev.peerId)) {
+            prevRoom.delete(prev.peerId);
+            for (const { socket: s } of prevRoom.values()) {
+              send(s, { type: 'peer-left', id: prev.peerId });
+            }
+            if (prevRoom.size === 0) {
+              rooms.delete(prev.roomCode);
+            } else {
+              broadcastPeerList(prev.roomCode);
+            }
+          }
+          sessionsById.delete(candidateSessionId);
+          try { prev.socket.close(); } catch {}
+          console.log(`[server] evicted ghost peer ${prev.peerId.slice(0, 6)} from "${prev.roomCode}" (sessionId reconnect)`);
+        }
+      }
+
       peerId = crypto.randomUUID();
       roomCode = requestedRoom;
+      sessionId = candidateSessionId;
       if (!rooms.has(roomCode)) rooms.set(roomCode, new Map());
       rooms.get(roomCode).set(peerId, { socket, name, userId });
+      if (sessionId) sessionsById.set(sessionId, { socket, peerId, roomCode });
       send(socket, { type: 'welcome', id: peerId, room: roomCode, name });
       broadcastPeerList(roomCode);
       broadcastStats();
@@ -402,9 +434,15 @@ wss.on('connection', (socket, req) => {
   socket.on('close', () => {
     clearInterval(hb);
     if (watcher) watchers.delete(socket);
+    if (sessionId) {
+      const entry = sessionsById.get(sessionId);
+      if (entry && entry.socket === socket) sessionsById.delete(sessionId);
+    }
     if (!peerId || !roomCode) return;
     const room = rooms.get(roomCode);
     if (!room) return;
+    // Don't double-remove if this peerId was already evicted by a sessionId reconnect.
+    if (!room.has(peerId) || room.get(peerId).socket !== socket) return;
     room.delete(peerId);
     console.log(`[server] peer ${peerId.slice(0, 6)} left "${roomCode}" (room size: ${room.size})`);
     if (room.size === 0) {

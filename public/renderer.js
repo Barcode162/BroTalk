@@ -324,16 +324,23 @@ function startWatchChannel() {
     const ws = new WebSocket(state.signalingUrl);
     state.signaling = ws;
     ws.onopen = () => {
+      if (state.signaling !== ws) return;
       sendSignal({ type: 'watch' });
       state.watching = true;
       state.wsLastMsg = Date.now();
       startWsHeartbeatWatchdog();
     };
-    ws.onmessage = (ev) => handleSignalingMessage(ev.data);
+    ws.onmessage = (ev) => {
+      // ignore messages from a socket we've already replaced
+      if (state.signaling !== ws) return;
+      handleSignalingMessage(ev.data);
+    };
     ws.onclose = () => {
-      stopWsHeartbeatWatchdog();
+      // a newer socket has taken over — leave its state alone
+      if (state.signaling !== ws && state.signaling !== null) return;
+      if (state.signaling === ws) state.signaling = null;
       state.watching = false;
-      state.signaling = null;
+      stopWsHeartbeatWatchdog();
       if (state.currentScreen === 'welcome' && !state.myRoom) {
         scheduleReconnect();
       }
@@ -1758,6 +1765,13 @@ async function handleSignalingMessage(raw) {
 
 function connectSignaling(url) {
   return new Promise((resolve, reject) => {
+    // Defensively close any leftover socket (watch or otherwise) so its lingering
+    // onclose handler can't null out the new state.signaling we're about to set.
+    if (state.signaling) {
+      const old = state.signaling;
+      state.signaling = null;
+      try { old.close(); } catch {}
+    }
     const ws = new WebSocket(url);
     state.signaling = ws;
 
@@ -1772,6 +1786,7 @@ function connectSignaling(url) {
 
     ws.onopen = () => {
       if (settled) return;
+      if (state.signaling !== ws) return;
       settled = true;
       clearTimeout(timeout);
       state.wsLastMsg = Date.now();
@@ -1787,16 +1802,22 @@ function connectSignaling(url) {
       }
     };
     ws.onclose = () => {
+      // a newer socket has taken over — don't touch its state
+      if (state.signaling !== ws && state.signaling !== null) return;
+      if (state.signaling === ws) state.signaling = null;
       stopWsHeartbeatWatchdog();
       if (state.intendedRoom) {
         showReconnectPill('reconnecting…');
         scheduleReconnect();
       } else if (state.currentScreen === 'welcome') {
-        state.signaling = null;
         scheduleReconnect();
       }
     };
-    ws.onmessage = (ev) => handleSignalingMessage(ev.data);
+    ws.onmessage = (ev) => {
+      // drop messages from a socket we've already replaced
+      if (state.signaling !== ws) return;
+      handleSignalingMessage(ev.data);
+    };
   });
 }
 
@@ -1823,6 +1844,9 @@ function stopWsHeartbeatWatchdog() {
 
 function scheduleReconnect() {
   if (state.reconnectTimer) return;
+  // already connected? skip — this lets stale onclose handlers from a previous
+  // socket fire scheduleReconnect harmlessly without reopening anything.
+  if (state.signaling && state.signaling.readyState === WebSocket.OPEN) return;
   const attempt = state.reconnectAttempt;
   const delay = RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)];
   state.reconnectAttempt = attempt + 1;
@@ -1834,13 +1858,15 @@ function scheduleReconnect() {
 }
 
 async function doReconnect() {
+  // double-check at fire time
+  if (state.signaling && state.signaling.readyState === WebSocket.OPEN) return;
   if (state.intendedRoom) {
     // mid-call reconnect: re-establish signaling + rejoin
     try {
       // tear down existing peer connections; they will be re-negotiated after rejoin
       for (const id of Object.keys(state.peerConnections)) cleanupPeer(id);
       await connectSignaling(state.signalingUrl);
-      const join = { type: 'join', room: state.intendedRoom };
+      const join = { type: 'join', room: state.intendedRoom, sessionId: state.sessionId };
       if (state.auth && state.auth.token) join.token = state.auth.token;
       else join.name = 'guest';
       sendSignal(join);
@@ -2009,7 +2035,7 @@ async function doConnect(room) {
     startMicMeter();
     state.iceServers = await fetchIceServers();
     await connectSignaling(state.signalingUrl);
-    const join = { type: 'join', room };
+    const join = { type: 'join', room, sessionId: state.sessionId };
     if (state.auth && state.auth.token) {
       join.token = state.auth.token;
     } else {
