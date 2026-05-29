@@ -268,10 +268,40 @@ const watchers = new Set();
 // can immediately boot the previous ghost peer instead of waiting 60s for heartbeat.
 const sessionsById = new Map();
 
+// Direct messages: usernameLower -> Set<socket>. Purely additive relay between
+// authed users who are currently online; no room membership required, no DB.
+// Disable with DM_RELAY=0. History lives on each client.
+const dmUsers = new Map();
+const DM_RELAY = process.env.DM_RELAY !== '0' && process.env.DM_RELAY !== 'false';
+
 function send(socket, msg) {
   if (socket.readyState === 1) {
     try { socket.send(JSON.stringify(msg)); } catch {}
   }
+}
+
+function registerDmUser(username, socket) {
+  if (!username) return;
+  const key = username.toLowerCase();
+  let set = dmUsers.get(key);
+  if (!set) { set = new Set(); dmUsers.set(key, set); }
+  set.add(socket);
+  socket.dmUsername = username;
+}
+
+function unregisterDmUser(socket) {
+  const key = socket.dmUsername && socket.dmUsername.toLowerCase();
+  if (!key) return;
+  const set = dmUsers.get(key);
+  if (set) { set.delete(socket); if (set.size === 0) dmUsers.delete(key); }
+}
+
+function deliverDm(toLower, payload) {
+  const set = dmUsers.get(toLower);
+  if (!set || set.size === 0) return 0;
+  let n = 0;
+  for (const s of set) { send(s, payload); n++; }
+  return n;
 }
 
 function normalizeRoom(raw) {
@@ -413,11 +443,40 @@ wss.on('connection', (socket, req) => {
       sessionId = candidateSessionId;
       if (!rooms.has(roomCode)) rooms.set(roomCode, new Map());
       rooms.get(roomCode).set(peerId, { socket, name, userId });
+      if (DM_RELAY && claims && claims.username) { socket.dmAuthName = claims.username; registerDmUser(claims.username, socket); }
       if (sessionId) sessionsById.set(sessionId, { socket, peerId, roomCode });
       send(socket, { type: 'welcome', id: peerId, room: roomCode, name });
       broadcastPeerList(roomCode);
       broadcastStats();
       console.log(`[server] peer ${peerId.slice(0, 6)} joined "${roomCode}" as "${name}"${userId ? ' (authed)' : ' (guest)'} from ${remote} (room size: ${rooms.get(roomCode).size})`);
+      return;
+    }
+
+    // ── Direct messages (additive; independent of room membership) ──
+    if (msg.type === 'identify') {
+      if (!DM_RELAY) return;
+      const claims = msg.token ? verifyToken(msg.token) : null;
+      if (claims && claims.username) {
+        socket.dmAuthName = claims.username;
+        registerDmUser(claims.username, socket);
+        send(socket, { type: 'identified', username: claims.username });
+      }
+      return;
+    }
+
+    if (msg.type === 'dm') {
+      if (!DM_RELAY) return;
+      const fromName = socket.dmAuthName || socket.dmUsername || '';
+      if (!fromName) { send(socket, { type: 'dm-status', id: msg.id, status: 'unauthed' }); return; }
+      const to = String(msg.to || '').toLowerCase().trim().slice(0, 24);
+      const text = String(msg.text || '').slice(0, 2000);
+      if (!to || !text) return;
+      const payload = {
+        type: 'dm', from: fromName.toLowerCase(), fromName,
+        text, id: String(msg.id || ''), ts: Number(msg.ts) || Date.now(),
+      };
+      const delivered = deliverDm(to, payload);
+      send(socket, { type: 'dm-status', id: msg.id, status: delivered > 0 ? 'delivered' : 'offline' });
       return;
     }
 
@@ -433,6 +492,7 @@ wss.on('connection', (socket, req) => {
 
   socket.on('close', () => {
     clearInterval(hb);
+    unregisterDmUser(socket);
     if (watcher) watchers.delete(socket);
     if (sessionId) {
       const entry = sessionsById.get(sessionId);

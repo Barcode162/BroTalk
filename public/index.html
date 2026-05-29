@@ -38,6 +38,7 @@
           <button id="btn-open-menu-corner" class="btn ghost" title="Open menu">menu</button>
         </header>
         <header class="welcome-corner welcome-corner-right">
+          <button id="btn-messages" class="btn ghost hidden" title="Direct messages">messages<span id="dm-badge" class="chat-unread hidden">0</span></button>
           <button id="btn-settings" class="btn ghost" title="Settings">settings</button>
           <button id="btn-signin-corner" class="btn ghost btn-signin-corner hidden" title="Sign in">Sign in</button>
           <button id="btn-profile" class="profile-chip hidden" title="Account">
@@ -76,6 +77,10 @@
             <code id="room-display">lobby</code>
           </div>
           <div class="conv-actions">
+            <button id="btn-toggle-audio" class="btn ghost btn-audio-toggle" title="Audio settings" aria-pressed="false">
+              <span class="audio-toggle-glyph" aria-hidden="true">🎚</span>
+              <span class="btn-label">audio</span>
+            </button>
             <button id="btn-toggle-chat" class="btn ghost btn-chat-toggle" title="Open chat" aria-pressed="false">
               <span class="btn-label">chat</span>
               <span id="chat-unread" class="chat-unread hidden">0</span>
@@ -123,7 +128,7 @@
               <button id="btn-close-chat" class="btn ghost btn-chat-close" title="Close chat">×</button>
             </header>
             <div id="chat-empty" class="chat-empty">
-              <p class="chat-empty-line">say something. files stay peer-to-peer.</p>
+              <p class="chat-empty-line">say something. text is saved on this device; files stay peer-to-peer.</p>
             </div>
             <ul id="chat-messages" class="chat-messages" aria-live="polite"></ul>
             <form id="chat-form" class="chat-form" autocomplete="off">
@@ -161,6 +166,127 @@
           <span class="reconnect-spinner" aria-hidden="true"></span>
           <span id="reconnect-pill-text">reconnecting…</span>
         </div>
+
+        <!-- Audio studio panel -->
+        <div id="audio-scrim" class="audio-scrim" data-open="false"></div>
+        <aside id="audio-panel" class="audio-panel" data-open="false" aria-label="Audio settings">
+          <header class="audio-panel-header">
+            <div>
+              <span class="conv-eyebrow">audio studio</span>
+              <h2 class="audio-panel-title">Tune your sound</h2>
+            </div>
+            <button id="btn-close-audio" class="btn ghost btn-chat-close" title="Close">×</button>
+          </header>
+
+          <div class="audio-panel-body">
+            <!-- Live input + noise gate -->
+            <section class="audio-section">
+              <div class="audio-section-head">
+                <span class="audio-section-title">Input &amp; Noise Gate</span>
+                <label class="switch" title="Enable noise gate"><input type="checkbox" id="gate-enabled" /><span class="switch-track"></span></label>
+              </div>
+              <p class="audio-section-hint">Watch your level. Set the line so room hiss stays under it and your voice opens the gate.</p>
+              <div class="gate-meter" id="gate-meter">
+                <div class="gate-meter-fill" id="gate-meter-fill"></div>
+                <div class="gate-meter-threshold" id="gate-threshold-line"></div>
+                <span class="gate-open-dot" id="gate-open-dot" title="gate open"></span>
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Threshold</span><span class="audio-row-val" id="gate-threshold-val">-50 dB</span></div>
+                <input type="range" id="gate-threshold" min="-80" max="-10" step="1" value="-50" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Release</span><span class="audio-row-val" id="gate-release-val">250 ms</span></div>
+                <input type="range" id="gate-release" min="20" max="800" step="10" value="250" />
+              </div>
+            </section>
+
+            <!-- AGC -->
+            <section class="audio-section">
+              <div class="audio-section-head">
+                <span class="audio-section-title">Automatic Gain</span>
+                <label class="switch" title="Enable automatic gain control"><input type="checkbox" id="agc-enabled" /><span class="switch-track"></span></label>
+              </div>
+              <p class="audio-section-hint">Keeps your voice steady whether you lean in or sit back.</p>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Target level</span><span class="audio-row-val" id="agc-target-val">-18 dB</span></div>
+                <input type="range" id="agc-target" min="-40" max="-6" step="1" value="-18" />
+              </div>
+            </section>
+
+            <!-- EQ -->
+            <section class="audio-section">
+              <div class="audio-section-head">
+                <span class="audio-section-title">Equalizer</span>
+                <label class="switch" title="Enable EQ"><input type="checkbox" id="eq-enabled" /><span class="switch-track"></span></label>
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Low</span><span class="audio-row-val" id="eq-low-val">0 dB</span></div>
+                <input type="range" id="eq-low" min="-12" max="12" step="0.5" value="0" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Mid</span><span class="audio-row-val" id="eq-mid-val">0 dB</span></div>
+                <input type="range" id="eq-mid" min="-12" max="12" step="0.5" value="0" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">High</span><span class="audio-row-val" id="eq-high-val">0 dB</span></div>
+                <input type="range" id="eq-high" min="-12" max="12" step="0.5" value="0" />
+              </div>
+              <label class="audio-check"><input type="checkbox" id="eq-lowcut" /> Low-cut — remove rumble below 80 Hz</label>
+            </section>
+
+            <!-- Compressor -->
+            <section class="audio-section">
+              <div class="audio-section-head">
+                <span class="audio-section-title">Compressor</span>
+                <label class="switch" title="Enable compressor"><input type="checkbox" id="comp-enabled" /><span class="switch-track"></span></label>
+              </div>
+              <p class="audio-section-hint">Evens out loud and soft moments so you're easier to hear.</p>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Threshold</span><span class="audio-row-val" id="comp-threshold-val">-24 dB</span></div>
+                <input type="range" id="comp-threshold" min="-60" max="0" step="1" value="-24" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Ratio</span><span class="audio-row-val" id="comp-ratio-val">3:1</span></div>
+                <input type="range" id="comp-ratio" min="1" max="20" step="0.5" value="3" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Attack</span><span class="audio-row-val" id="comp-attack-val">3 ms</span></div>
+                <input type="range" id="comp-attack" min="0" max="100" step="1" value="3" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Release</span><span class="audio-row-val" id="comp-release-val">250 ms</span></div>
+                <input type="range" id="comp-release" min="50" max="1000" step="10" value="250" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Makeup gain</span><span class="audio-row-val" id="comp-makeup-val">0 dB</span></div>
+                <input type="range" id="comp-makeup" min="0" max="24" step="0.5" value="0" />
+              </div>
+            </section>
+
+            <!-- Reverb -->
+            <section class="audio-section">
+              <div class="audio-section-head">
+                <span class="audio-section-title">Reverb</span>
+                <label class="switch" title="Enable reverb"><input type="checkbox" id="reverb-enabled" /><span class="switch-track"></span></label>
+              </div>
+              <p class="audio-section-hint">A touch of room. Keep it low for voice.</p>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Mix</span><span class="audio-row-val" id="reverb-mix-val">20%</span></div>
+                <input type="range" id="reverb-mix" min="0" max="100" step="1" value="20" />
+              </div>
+              <div class="audio-row">
+                <div class="audio-row-head"><span class="audio-row-label">Size</span><span class="audio-row-val" id="reverb-size-val">1.8 s</span></div>
+                <input type="range" id="reverb-size" min="0.2" max="5" step="0.1" value="1.8" />
+              </div>
+            </section>
+
+            <div class="audio-panel-foot">
+              <button id="btn-audio-reset" class="btn ghost">Reset to default</button>
+              <span class="audio-foot-note">Live · saved automatically</span>
+            </div>
+          </div>
+        </aside>
       </section>
 
       <!-- Settings screen -->
@@ -432,6 +558,46 @@
             <button type="submit" class="btn primary btn-block">Create account</button>
             <div id="signup-error" class="error hidden"></div>
           </form>
+        </div>
+      </section>
+
+      <!-- Messages (direct messages) screen -->
+      <section id="screen-messages" class="screen">
+        <header class="conv-header">
+          <button id="btn-back-from-messages" class="btn ghost">← back</button>
+          <div class="conv-title">
+            <span class="conv-eyebrow">direct messages</span>
+          </div>
+          <button id="btn-new-dm" class="btn ghost" title="New message">+ new</button>
+        </header>
+
+        <div class="scroll-area scroll-area-narrow dm-screen">
+          <form id="form-new-dm" class="dm-new-form hidden" autocomplete="off">
+            <span class="field-label">message someone by username</span>
+            <div class="drawer-form-row">
+              <input id="new-dm-username" class="field-input" type="text" maxlength="24" placeholder="username" autocomplete="off" />
+              <button type="submit" class="btn primary">start</button>
+            </div>
+            <div id="dm-error" class="error hidden"></div>
+          </form>
+
+          <ul id="dm-conversations" class="dm-conversations" aria-label="Conversations"></ul>
+          <div id="dm-empty" class="dm-empty">
+            <p class="chat-empty-line">no conversations yet. tap “+ new” to message a friend by username.</p>
+          </div>
+
+          <section id="dm-thread" class="dm-thread" data-open="false">
+            <header class="dm-thread-head">
+              <button id="btn-dm-back" class="btn ghost dm-back-btn" title="Back to conversations">←</button>
+              <span class="dm-thread-name" id="dm-thread-name">—</span>
+              <span class="dm-thread-status" id="dm-thread-status"></span>
+            </header>
+            <ul id="dm-messages" class="chat-messages dm-messages" aria-live="polite"></ul>
+            <form id="dm-form" class="chat-form" autocomplete="off">
+              <input id="dm-input" class="chat-input" type="text" maxlength="2000" placeholder="message…" />
+              <button id="btn-dm-send" type="submit" class="btn primary btn-chat-send" disabled>send</button>
+            </form>
+          </section>
         </div>
       </section>
     </main>

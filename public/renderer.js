@@ -29,6 +29,11 @@ const CHAT_CHUNK_SIZE = 16 * 1024;
 const CHAT_BUFFER_HIGH = 16 * 1024 * 1024;
 const CHAT_BUFFER_LOW  = 1 * 1024 * 1024;
 const CHAT_HISTORY_MAX = 50;
+const CHAT_LOG_MAX = 300;
+const LS_CHAT_PREFIX = 'brotalk.chat.';
+const LS_DMS = 'brotalk.dms';
+const DM_MSG_MAX = 500;
+const USERNAME_DM_RE = /^[A-Za-z0-9_-]{3,24}$/;
 
 const DEFAULT_ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -97,6 +102,11 @@ const state = {
   analyser: null,
   analyserData: null,
   meterRaf: 0,
+  audio: null,
+  audioSettings: null,
+  audioPanelOpen: false,
+  dm: { conversations: {}, currentPeer: null },
+  identitySent: false,
   iceServers: null,
   currentScreen: 'loading',
   recentRooms: [],
@@ -159,6 +169,19 @@ function bindEls() {
     'chat-empty', 'chat-messages', 'chat-form', 'chat-file', 'chat-input', 'btn-chat-send',
     'mic-denied-card', 'mic-denied-instructions', 'btn-mic-open-settings', 'btn-mic-retry',
     'theme-grid',
+    'btn-toggle-audio', 'btn-close-audio', 'audio-panel', 'audio-scrim',
+    'gate-enabled', 'gate-meter', 'gate-meter-fill', 'gate-threshold-line', 'gate-open-dot',
+    'gate-threshold', 'gate-threshold-val', 'gate-release', 'gate-release-val',
+    'agc-enabled', 'agc-target', 'agc-target-val',
+    'eq-enabled', 'eq-low', 'eq-low-val', 'eq-mid', 'eq-mid-val', 'eq-high', 'eq-high-val', 'eq-lowcut',
+    'comp-enabled', 'comp-threshold', 'comp-threshold-val', 'comp-ratio', 'comp-ratio-val',
+    'comp-attack', 'comp-attack-val', 'comp-release', 'comp-release-val', 'comp-makeup', 'comp-makeup-val',
+    'reverb-enabled', 'reverb-mix', 'reverb-mix-val', 'reverb-size', 'reverb-size-val',
+    'btn-audio-reset',
+    'btn-messages', 'dm-badge', 'screen-messages', 'btn-back-from-messages', 'btn-new-dm',
+    'form-new-dm', 'new-dm-username', 'dm-error', 'dm-conversations', 'dm-empty',
+    'dm-thread', 'btn-dm-back', 'dm-thread-name', 'dm-thread-status', 'dm-messages',
+    'dm-form', 'dm-input', 'btn-dm-send',
   ];
   for (const id of ids) els[camel(id)] = document.getElementById(id);
 }
@@ -216,13 +239,14 @@ function applyTheme(theme) {
 function showScreen(name) {
   state.currentScreen = name;
   document.body.dataset.screen = name;
-  for (const key of ['Loading', 'Welcome', 'Call', 'Settings', 'Profile', 'Auth']) {
+  for (const key of ['Loading', 'Welcome', 'Call', 'Settings', 'Profile', 'Auth', 'Messages']) {
     const el = els['screen' + key];
     if (!el) continue;
     el.dataset.active = (key.toLowerCase() === name) ? 'true' : 'false';
   }
   if (name !== 'welcome' && name !== 'loading') closeDrawer();
   closeMicPopover();
+  if (name !== 'call') closeAudioPanel();
   manageWatchChannel();
 }
 
@@ -306,7 +330,7 @@ function stopOnlinePolling() {
 }
 
 function manageWatchChannel() {
-  const wantWatch = state.currentScreen === 'welcome' && !state.myRoom;
+  const wantWatch = (state.currentScreen === 'welcome' || state.currentScreen === 'messages') && !state.myRoom;
   if (wantWatch && !state.watching) startWatchChannel();
   else if (!wantWatch && state.watching) stopWatchChannel();
 }
@@ -329,6 +353,7 @@ function startWatchChannel() {
       state.watching = true;
       state.wsLastMsg = Date.now();
       startWsHeartbeatWatchdog();
+      sendIdentify();
     };
     ws.onmessage = (ev) => {
       // ignore messages from a socket we've already replaced
@@ -474,6 +499,7 @@ function renderProfileChip() {
       els.btnSigninCorner.classList.remove('hidden');
     }
   }
+  if (els.btnMessages) els.btnMessages.classList.toggle('hidden', !u);
 }
 
 function renderProfileScreen() {
@@ -870,62 +896,370 @@ async function switchMicDevice(deviceId) {
   const newTrack = newStream.getAudioTracks()[0];
   newTrack.enabled = !state.isMuted;
 
-  for (const pc of Object.values(state.peerConnections)) {
-    const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
-    if (sender) {
-      try { await sender.replaceTrack(newTrack); } catch (err) {
-        console.error('[renderer] replaceTrack failed:', err);
+  // swap the raw input, rebuild the processing chain on it, then push the new
+  // processed output track to every peer.
+  for (const t of state.localStream.getTracks()) t.stop();
+  state.localStream = newStream;
+  setupAudioChain();
+
+  const outTrack = getOutboundTrack();
+  if (outTrack) {
+    for (const pc of Object.values(state.peerConnections)) {
+      const sender = pc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+      if (sender) {
+        try { await sender.replaceTrack(outTrack); } catch (err) {
+          console.error('[renderer] replaceTrack failed:', err);
+        }
       }
     }
   }
-
-  for (const t of state.localStream.getTracks()) t.stop();
-  state.localStream = newStream;
-  startMicMeter();
 }
 
-function startMicMeter() {
-  if (!state.localStream) return;
-  stopMicMeter();
+/* ── Audio processing chain (DSP) ────────────────────
+ * mic → low-cut/EQ → compressor → reverb (dry/wet) → noise gate → AGC → out
+ * The destination's track is what we send to peers, so every effect lands on
+ * outgoing audio. With all effects off the chain is transparent. */
+
+const LS_AUDIO = 'brotalk.audioSettings';
+
+const AUDIO_DEFAULTS = {
+  gate:   { enabled: false, threshold: -50, release: 250 },
+  agc:    { enabled: false, target: -18 },
+  eq:     { enabled: false, low: 0, mid: 0, high: 0, lowcut: false },
+  comp:   { enabled: false, threshold: -24, ratio: 3, attack: 3, release: 250, makeup: 0 },
+  reverb: { enabled: false, mix: 20, size: 1.8 },
+};
+
+function loadAudioSettings() {
+  const base = JSON.parse(JSON.stringify(AUDIO_DEFAULTS));
   try {
-    state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = state.audioCtx.createMediaStreamSource(state.localStream);
-    state.analyser = state.audioCtx.createAnalyser();
-    state.analyser.fftSize = 512;
-    state.analyser.smoothingTimeConstant = 0.7;
-    source.connect(state.analyser);
-    state.analyserData = new Uint8Array(state.analyser.fftSize);
-    const tick = () => {
-      if (!state.analyser) return;
-      state.analyser.getByteTimeDomainData(state.analyserData);
-      let sum = 0;
-      for (let i = 0; i < state.analyserData.length; i++) {
-        const v = (state.analyserData[i] - 128) / 128;
-        sum += v * v;
-      }
-      const rms = Math.sqrt(sum / state.analyserData.length);
-      const pct = Math.min(100, Math.round(rms * 400));
-      if (els.micFill) els.micFill.style.width = (state.isMuted ? 0 : pct) + '%';
-      state.meterRaf = requestAnimationFrame(tick);
-    };
-    state.meterRaf = requestAnimationFrame(tick);
+    const raw = localStorage.getItem(LS_AUDIO);
+    if (raw) {
+      const p = JSON.parse(raw);
+      for (const k of Object.keys(base)) if (p && typeof p[k] === 'object') Object.assign(base[k], p[k]);
+    }
+  } catch {}
+  return base;
+}
+
+function saveAudioSettings() {
+  try { localStorage.setItem(LS_AUDIO, JSON.stringify(state.audioSettings)); } catch {}
+}
+
+function dbToGain(db) { return Math.pow(10, db / 20); }
+
+function makeImpulseResponse(ctx, seconds) {
+  const rate = ctx.sampleRate;
+  const len = Math.max(1, Math.floor(Math.min(seconds, 6) * rate));
+  const ir = ctx.createBuffer(2, len, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      const t = i / len;
+      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.4);
+    }
+  }
+  return ir;
+}
+
+function getOutboundStream() {
+  return (state.audio && state.audio.outputStream) || state.localStream;
+}
+function getOutboundTrack() {
+  const s = getOutboundStream();
+  return s ? s.getAudioTracks()[0] : null;
+}
+
+function setupAudioChain() {
+  if (!state.localStream) return;
+  teardownAudioChain();
+  if (!state.audioSettings) state.audioSettings = loadAudioSettings();
+  let ctx;
+  try { ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000, latencyHint: 'interactive' }); }
+  catch { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return; } }
+
+  const a = { ctx, gateOpen: true, agcCurrentGain: 1, meterRaf: 0 };
+  try {
+    a.source = ctx.createMediaStreamSource(state.localStream);
+
+    a.lowcut = ctx.createBiquadFilter(); a.lowcut.type = 'highpass'; a.lowcut.frequency.value = 10;
+    a.eqLow = ctx.createBiquadFilter(); a.eqLow.type = 'lowshelf'; a.eqLow.frequency.value = 180;
+    a.eqMid = ctx.createBiquadFilter(); a.eqMid.type = 'peaking'; a.eqMid.frequency.value = 1100; a.eqMid.Q.value = 0.9;
+    a.eqHigh = ctx.createBiquadFilter(); a.eqHigh.type = 'highshelf'; a.eqHigh.frequency.value = 6500;
+
+    a.comp = ctx.createDynamicsCompressor();
+    a.compMakeup = ctx.createGain();
+
+    a.dry = ctx.createGain();
+    a.wet = ctx.createGain();
+    a.convolver = ctx.createConvolver();
+    a.reverbSum = ctx.createGain();
+
+    a.preGate = ctx.createGain();
+    a.gateAnalyser = ctx.createAnalyser();
+    a.gateAnalyser.fftSize = 1024;
+    a.gateAnalyser.smoothingTimeConstant = 0.3;
+    a.gateGain = ctx.createGain();
+    a.agcGain = ctx.createGain();
+    a.dest = ctx.createMediaStreamDestination();
+
+    a.source.connect(a.lowcut);
+    a.lowcut.connect(a.eqLow);
+    a.eqLow.connect(a.eqMid);
+    a.eqMid.connect(a.eqHigh);
+    a.eqHigh.connect(a.comp);
+    a.comp.connect(a.compMakeup);
+    a.compMakeup.connect(a.dry);
+    a.compMakeup.connect(a.convolver);
+    a.convolver.connect(a.wet);
+    a.dry.connect(a.reverbSum);
+    a.wet.connect(a.reverbSum);
+    a.reverbSum.connect(a.preGate);
+    a.preGate.connect(a.gateAnalyser);
+    a.preGate.connect(a.gateGain);
+    a.gateGain.connect(a.agcGain);
+    a.agcGain.connect(a.dest);
+
+    a.convolver.buffer = makeImpulseResponse(ctx, state.audioSettings.reverb.size);
+    a.outputStream = a.dest.stream;
   } catch (err) {
-    console.error('[renderer] mic meter setup failed:', err);
+    console.error('[renderer] audio chain build failed:', err);
+    try { ctx.close(); } catch {}
+    return;
+  }
+
+  state.audio = a;
+  try { ctx.resume(); } catch {}
+  applyAudioSettings();
+  startAudioMeters();
+}
+
+function teardownAudioChain() {
+  const a = state.audio;
+  if (!a) return;
+  if (a.meterRaf) cancelAnimationFrame(a.meterRaf);
+  try { a.source.disconnect(); } catch {}
+  try { a.ctx.close(); } catch {}
+  state.audio = null;
+  if (els.micFill) els.micFill.style.width = '0%';
+  if (els.gateMeterFill) els.gateMeterFill.style.width = '0%';
+}
+
+function applyAudioSettings() {
+  const a = state.audio;
+  if (!a) return;
+  const s = state.audioSettings;
+  const now = a.ctx.currentTime;
+
+  const eqOn = s.eq.enabled;
+  a.eqLow.gain.value = eqOn ? s.eq.low : 0;
+  a.eqMid.gain.value = eqOn ? s.eq.mid : 0;
+  a.eqHigh.gain.value = eqOn ? s.eq.high : 0;
+  a.lowcut.frequency.value = (eqOn && s.eq.lowcut) ? 80 : 10;
+
+  if (s.comp.enabled) {
+    a.comp.threshold.value = s.comp.threshold;
+    a.comp.ratio.value = s.comp.ratio;
+    a.comp.knee.value = 24;
+    a.comp.attack.value = Math.max(0, s.comp.attack / 1000);
+    a.comp.release.value = Math.max(0.01, s.comp.release / 1000);
+    a.compMakeup.gain.value = dbToGain(s.comp.makeup);
+  } else {
+    a.comp.threshold.value = 0;
+    a.comp.ratio.value = 1;
+    a.comp.knee.value = 0;
+    a.comp.attack.value = 0.003;
+    a.comp.release.value = 0.25;
+    a.compMakeup.gain.value = 1;
+  }
+
+  const mix = s.reverb.enabled ? Math.max(0, Math.min(1, s.reverb.mix / 100)) : 0;
+  a.wet.gain.value = mix * 0.9;
+  a.dry.gain.value = 1 - mix * 0.55;
+
+  if (!s.gate.enabled) { try { a.gateGain.gain.setTargetAtTime(1, now, 0.04); } catch {} a.gateOpen = true; }
+  if (!s.agc.enabled) { try { a.agcGain.gain.setTargetAtTime(1, now, 0.2); } catch {} a.agcCurrentGain = 1; }
+}
+
+function regenerateReverb() {
+  const a = state.audio;
+  if (!a) return;
+  try { a.convolver.buffer = makeImpulseResponse(a.ctx, state.audioSettings.reverb.size); } catch {}
+}
+
+function startAudioMeters() {
+  const a = state.audio;
+  if (!a) return;
+  const buf = new Float32Array(a.gateAnalyser.fftSize);
+  const tick = () => {
+    if (!state.audio || state.audio !== a) return;
+    a.gateAnalyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    const db = rms > 1e-6 ? 20 * Math.log10(rms) : -100;
+    const pct = Math.max(0, Math.min(100, ((db + 70) / 70) * 100));
+    const shown = state.isMuted ? 0 : pct;
+    if (els.micFill) els.micFill.style.width = shown + '%';
+    if (els.gateMeterFill) els.gateMeterFill.style.width = shown.toFixed(1) + '%';
+
+    const s = state.audioSettings;
+    const now = a.ctx.currentTime;
+    if (s.gate.enabled) {
+      const open = db > s.gate.threshold;
+      if (open) { try { a.gateGain.gain.setTargetAtTime(1, now, 0.006); } catch {} a.gateOpen = true; }
+      else { try { a.gateGain.gain.setTargetAtTime(0.0001, now, Math.max(0.02, s.gate.release / 3000)); } catch {} a.gateOpen = false; }
+      if (els.gateOpenDot) els.gateOpenDot.classList.toggle('is-open', a.gateOpen && !state.isMuted);
+    } else if (els.gateOpenDot) {
+      els.gateOpenDot.classList.remove('is-open');
+    }
+
+    if (s.agc.enabled && !state.isMuted && rms > 8e-4) {
+      const targetRms = Math.pow(10, s.agc.target / 20);
+      const desired = Math.max(0.25, Math.min(6, targetRms / rms));
+      a.agcCurrentGain += (desired - a.agcCurrentGain) * 0.04;
+      try { a.agcGain.gain.setTargetAtTime(a.agcCurrentGain, now, 0.25); } catch {}
+    }
+    a.meterRaf = requestAnimationFrame(tick);
+  };
+  a.meterRaf = requestAnimationFrame(tick);
+}
+
+/* compatibility shims — existing call sites use these names */
+function startMicMeter() { setupAudioChain(); }
+function stopMicMeter() { teardownAudioChain(); }
+
+/* ── Audio panel UI ──────────────────────────────── */
+
+function openAudioPanel() {
+  if (!els.audioPanel) return;
+  state.audioPanelOpen = true;
+  els.audioPanel.dataset.open = 'true';
+  if (els.audioScrim) els.audioScrim.dataset.open = 'true';
+  if (els.btnToggleAudio) els.btnToggleAudio.setAttribute('aria-pressed', 'true');
+  syncAudioControls();
+}
+function closeAudioPanel() {
+  if (!els.audioPanel) return;
+  state.audioPanelOpen = false;
+  els.audioPanel.dataset.open = 'false';
+  if (els.audioScrim) els.audioScrim.dataset.open = 'false';
+  if (els.btnToggleAudio) els.btnToggleAudio.setAttribute('aria-pressed', 'false');
+}
+function toggleAudioPanel() { if (state.audioPanelOpen) closeAudioPanel(); else openAudioPanel(); }
+
+function updateGateThresholdLine() {
+  if (!els.gateThresholdLine) return;
+  const thr = state.audioSettings.gate.threshold;
+  const pct = Math.max(0, Math.min(100, ((thr + 70) / 70) * 100));
+  els.gateThresholdLine.style.left = pct + '%';
+}
+
+function reflectSectionStates() {
+  const map = [['gate-enabled', 'gate'], ['agc-enabled', 'agc'], ['eq-enabled', 'eq'], ['comp-enabled', 'comp'], ['reverb-enabled', 'reverb']];
+  for (const [id, key] of map) {
+    const cb = els[camel(id)];
+    if (cb) { const sec = cb.closest('.audio-section'); if (sec) sec.classList.toggle('is-on', !!state.audioSettings[key].enabled); }
   }
 }
 
-function stopMicMeter() {
-  if (state.meterRaf) {
-    cancelAnimationFrame(state.meterRaf);
-    state.meterRaf = 0;
-  }
-  state.analyser = null;
-  state.analyserData = null;
-  if (state.audioCtx) {
-    try { state.audioCtx.close(); } catch {}
-    state.audioCtx = null;
-  }
-  if (els.micFill) els.micFill.style.width = '0%';
+function syncAudioControls() {
+  if (!state.audioSettings) return;
+  const s = state.audioSettings;
+  const set = (id, val) => { if (els[camel(id)]) els[camel(id)].value = val; };
+  const chk = (id, val) => { if (els[camel(id)]) els[camel(id)].checked = !!val; };
+  const lbl = (id, txt) => { if (els[camel(id)]) els[camel(id)].textContent = txt; };
+  const sgn = (v) => (v > 0 ? '+' : '') + v;
+
+  chk('gate-enabled', s.gate.enabled);
+  set('gate-threshold', s.gate.threshold); lbl('gate-threshold-val', s.gate.threshold + ' dB');
+  set('gate-release', s.gate.release); lbl('gate-release-val', s.gate.release + ' ms');
+  updateGateThresholdLine();
+
+  chk('agc-enabled', s.agc.enabled);
+  set('agc-target', s.agc.target); lbl('agc-target-val', s.agc.target + ' dB');
+
+  chk('eq-enabled', s.eq.enabled);
+  set('eq-low', s.eq.low); lbl('eq-low-val', sgn(s.eq.low) + ' dB');
+  set('eq-mid', s.eq.mid); lbl('eq-mid-val', sgn(s.eq.mid) + ' dB');
+  set('eq-high', s.eq.high); lbl('eq-high-val', sgn(s.eq.high) + ' dB');
+  chk('eq-lowcut', s.eq.lowcut);
+
+  chk('comp-enabled', s.comp.enabled);
+  set('comp-threshold', s.comp.threshold); lbl('comp-threshold-val', s.comp.threshold + ' dB');
+  set('comp-ratio', s.comp.ratio); lbl('comp-ratio-val', s.comp.ratio + ':1');
+  set('comp-attack', s.comp.attack); lbl('comp-attack-val', s.comp.attack + ' ms');
+  set('comp-release', s.comp.release); lbl('comp-release-val', s.comp.release + ' ms');
+  set('comp-makeup', s.comp.makeup); lbl('comp-makeup-val', sgn(s.comp.makeup) + ' dB');
+
+  chk('reverb-enabled', s.reverb.enabled);
+  set('reverb-mix', s.reverb.mix); lbl('reverb-mix-val', s.reverb.mix + '%');
+  set('reverb-size', s.reverb.size); lbl('reverb-size-val', Number(s.reverb.size).toFixed(1) + ' s');
+
+  reflectSectionStates();
+}
+
+function wireAudioPanel() {
+  if (!els.audioPanel) return;
+  if (els.btnToggleAudio) els.btnToggleAudio.addEventListener('click', toggleAudioPanel);
+  if (els.btnCloseAudio) els.btnCloseAudio.addEventListener('click', closeAudioPanel);
+  if (els.audioScrim) els.audioScrim.addEventListener('click', closeAudioPanel);
+
+  const slider = (id, apply, fmt) => {
+    const el = els[camel(id)];
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = parseFloat(el.value);
+      apply(v);
+      const valEl = els[camel(id + '-val')];
+      if (valEl && fmt) valEl.textContent = fmt(v);
+      saveAudioSettings();
+    });
+  };
+  const toggle = (id, key) => {
+    const el = els[camel(id)];
+    if (!el) return;
+    el.addEventListener('change', () => {
+      state.audioSettings[key].enabled = el.checked;
+      applyAudioSettings();
+      reflectSectionStates();
+      saveAudioSettings();
+    });
+  };
+  const sgn = (v) => (v > 0 ? '+' : '') + v;
+
+  toggle('gate-enabled', 'gate');
+  slider('gate-threshold', (v) => { state.audioSettings.gate.threshold = v; updateGateThresholdLine(); }, (v) => v + ' dB');
+  slider('gate-release', (v) => { state.audioSettings.gate.release = v; }, (v) => v + ' ms');
+
+  toggle('agc-enabled', 'agc');
+  slider('agc-target', (v) => { state.audioSettings.agc.target = v; }, (v) => v + ' dB');
+
+  toggle('eq-enabled', 'eq');
+  slider('eq-low', (v) => { state.audioSettings.eq.low = v; applyAudioSettings(); }, (v) => sgn(v) + ' dB');
+  slider('eq-mid', (v) => { state.audioSettings.eq.mid = v; applyAudioSettings(); }, (v) => sgn(v) + ' dB');
+  slider('eq-high', (v) => { state.audioSettings.eq.high = v; applyAudioSettings(); }, (v) => sgn(v) + ' dB');
+  if (els.eqLowcut) els.eqLowcut.addEventListener('change', () => { state.audioSettings.eq.lowcut = els.eqLowcut.checked; applyAudioSettings(); saveAudioSettings(); });
+
+  toggle('comp-enabled', 'comp');
+  slider('comp-threshold', (v) => { state.audioSettings.comp.threshold = v; applyAudioSettings(); }, (v) => v + ' dB');
+  slider('comp-ratio', (v) => { state.audioSettings.comp.ratio = v; applyAudioSettings(); }, (v) => v + ':1');
+  slider('comp-attack', (v) => { state.audioSettings.comp.attack = v; applyAudioSettings(); }, (v) => v + ' ms');
+  slider('comp-release', (v) => { state.audioSettings.comp.release = v; applyAudioSettings(); }, (v) => v + ' ms');
+  slider('comp-makeup', (v) => { state.audioSettings.comp.makeup = v; applyAudioSettings(); }, (v) => sgn(v) + ' dB');
+
+  toggle('reverb-enabled', 'reverb');
+  slider('reverb-mix', (v) => { state.audioSettings.reverb.mix = v; applyAudioSettings(); }, (v) => v + '%');
+  slider('reverb-size', (v) => { state.audioSettings.reverb.size = v; regenerateReverb(); }, (v) => v.toFixed(1) + ' s');
+
+  if (els.btnAudioReset) els.btnAudioReset.addEventListener('click', () => {
+    state.audioSettings = JSON.parse(JSON.stringify(AUDIO_DEFAULTS));
+    saveAudioSettings();
+    regenerateReverb();
+    applyAudioSettings();
+    syncAudioControls();
+    toast('Audio reset to default');
+  });
 }
 
 /* ── Audio quality helpers ──────────────────────── */
@@ -968,6 +1302,214 @@ async function applyHighQualityAudio(pc) {
   }
 }
 
+/* ── Direct messages ─────────────────────────────── */
+
+function loadDms() {
+  try {
+    const raw = localStorage.getItem(LS_DMS);
+    const obj = raw ? JSON.parse(raw) : {};
+    state.dm.conversations = obj && typeof obj === 'object' ? obj : {};
+  } catch { state.dm.conversations = {}; }
+}
+
+function saveDms() {
+  try { localStorage.setItem(LS_DMS, JSON.stringify(state.dm.conversations)); } catch {}
+}
+
+function ensureConvo(key, name) {
+  let c = state.dm.conversations[key];
+  if (!c) { c = { name: name || key, unread: 0, updatedAt: 0, messages: [] }; state.dm.conversations[key] = c; }
+  if (name && c.name !== name) c.name = name;
+  return c;
+}
+
+function totalDmUnread() {
+  let n = 0;
+  for (const k in state.dm.conversations) n += state.dm.conversations[k].unread || 0;
+  return n;
+}
+
+function updateMessagesBadge() {
+  if (!els.dmBadge) return;
+  const n = totalDmUnread();
+  if (n > 0) { els.dmBadge.textContent = n > 99 ? '99+' : String(n); els.dmBadge.classList.remove('hidden'); }
+  else els.dmBadge.classList.add('hidden');
+}
+
+function myUsername() {
+  return (state.auth && state.auth.user && state.auth.user.username) || '';
+}
+
+function sendIdentify() {
+  if (!state.auth || !state.auth.token) return;
+  if (!state.signaling || state.signaling.readyState !== WebSocket.OPEN) return;
+  sendSignal({ type: 'identify', token: state.auth.token });
+  state.identitySent = true;
+}
+
+function receiveDm(m) {
+  const key = String(m.from || '').toLowerCase();
+  if (!key) return;
+  const convo = ensureConvo(key, m.fromName || m.from);
+  if (m.id && convo.messages.some((x) => x.id === m.id)) return;
+  const msg = { id: m.id || crypto.randomUUID(), text: String(m.text || '').slice(0, 2000), ts: Number(m.ts) || Date.now(), mine: false };
+  convo.messages.push(msg);
+  if (convo.messages.length > DM_MSG_MAX) convo.messages.splice(0, convo.messages.length - DM_MSG_MAX);
+  convo.updatedAt = msg.ts;
+  const viewing = state.currentScreen === 'messages' && state.dm.currentPeer === key;
+  if (!viewing) { convo.unread = (convo.unread || 0) + 1; toast(`DM from ${convo.name}`); }
+  saveDms();
+  updateMessagesBadge();
+  if (state.currentScreen === 'messages') {
+    renderConversations();
+    if (viewing) { appendDmBubble(msg); markConvoRead(key); }
+  }
+}
+
+function sendDm(text) {
+  const key = state.dm.currentPeer;
+  const trimmed = String(text || '').trim().slice(0, 2000);
+  if (!key || !trimmed) return;
+  const convo = ensureConvo(key);
+  const msg = { id: crypto.randomUUID(), text: trimmed, ts: Date.now(), mine: true, status: 'sending' };
+  convo.messages.push(msg);
+  if (convo.messages.length > DM_MSG_MAX) convo.messages.splice(0, convo.messages.length - DM_MSG_MAX);
+  convo.updatedAt = msg.ts;
+  saveDms();
+  appendDmBubble(msg);
+  renderConversations();
+  if (state.signaling && state.signaling.readyState === WebSocket.OPEN) {
+    if (!state.identitySent) sendIdentify();
+    sendSignal({ type: 'dm', to: key, toName: convo.name, id: msg.id, text: trimmed, ts: msg.ts });
+  } else {
+    setDmStatus(msg.id, 'offline');
+  }
+}
+
+function setDmStatus(id, status) {
+  for (const k in state.dm.conversations) {
+    const m = state.dm.conversations[k].messages.find((x) => x.id === id);
+    if (m) { m.status = status; saveDms(); break; }
+  }
+  const el = els.dmMessages && els.dmMessages.querySelector(`[data-dm-id="${cssEscape(id)}"] .dm-msg-status`);
+  if (el) el.textContent = dmStatusLabel(status);
+}
+
+function dmStatusLabel(status) {
+  return status === 'delivered' ? 'sent' : status === 'offline' ? 'offline' : status === 'unauthed' ? 'sign in to send' : '';
+}
+
+function renderConversations() {
+  if (!els.dmConversations) return;
+  const keys = Object.keys(state.dm.conversations)
+    .sort((a, b) => (state.dm.conversations[b].updatedAt || 0) - (state.dm.conversations[a].updatedAt || 0));
+  els.dmConversations.innerHTML = '';
+  if (els.dmEmpty) els.dmEmpty.classList.toggle('hidden', keys.length > 0);
+  for (const key of keys) {
+    const c = state.dm.conversations[key];
+    const last = c.messages[c.messages.length - 1];
+    const li = document.createElement('li');
+    li.className = 'dm-convo' + (c.unread ? ' has-unread' : '');
+    li.innerHTML = `
+      <span class="dm-convo-avatar">${escapeHtml(initialOf(c.name))}</span>
+      <div class="dm-convo-main">
+        <span class="dm-convo-name">${escapeHtml(c.name)}</span>
+        <span class="dm-convo-preview">${last ? (last.mine ? 'you: ' : '') + escapeHtml(last.text.slice(0, 60)) : 'no messages yet'}</span>
+      </div>
+      ${c.unread ? `<span class="chat-unread">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}`;
+    li.addEventListener('click', () => openThread(key));
+    els.dmConversations.appendChild(li);
+  }
+}
+
+function openThread(key) {
+  const convo = ensureConvo(key);
+  state.dm.currentPeer = key;
+  markConvoRead(key);
+  if (els.dmThread) els.dmThread.dataset.open = 'true';
+  if (els.dmThreadName) els.dmThreadName.textContent = convo.name;
+  if (els.dmThreadStatus) els.dmThreadStatus.textContent = '';
+  renderThread(convo);
+  if (els.dmInput) requestAnimationFrame(() => els.dmInput.focus());
+}
+
+function closeThread() {
+  state.dm.currentPeer = null;
+  if (els.dmThread) els.dmThread.dataset.open = 'false';
+  renderConversations();
+}
+
+function markConvoRead(key) {
+  const c = state.dm.conversations[key];
+  if (c && c.unread) { c.unread = 0; saveDms(); updateMessagesBadge(); renderConversations(); }
+}
+
+function renderThread(convo) {
+  if (!els.dmMessages) return;
+  els.dmMessages.innerHTML = '';
+  for (const m of convo.messages) appendDmBubble(m);
+}
+
+function appendDmBubble(m) {
+  if (!els.dmMessages) return;
+  const li = document.createElement('li');
+  li.className = 'chat-msg dm-msg' + (m.mine ? ' is-mine' : '');
+  li.dataset.dmId = m.id;
+
+  const head = document.createElement('div');
+  head.className = 'chat-msg-head';
+  const who = document.createElement('span');
+  who.className = 'chat-msg-name';
+  const convo = state.dm.currentPeer ? state.dm.conversations[state.dm.currentPeer] : null;
+  who.textContent = m.mine ? 'you' : (convo ? convo.name : 'them');
+  const when = document.createElement('span');
+  when.className = 'chat-msg-time';
+  when.textContent = formatChatTime(m.ts);
+  head.appendChild(who);
+  head.appendChild(when);
+  li.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'chat-msg-body chat-msg-body-text';
+  renderLinkedText(body, m.text);
+  li.appendChild(body);
+
+  if (m.mine) {
+    const st = document.createElement('span');
+    st.className = 'dm-msg-status';
+    st.textContent = dmStatusLabel(m.status);
+    li.appendChild(st);
+  }
+  els.dmMessages.appendChild(li);
+  els.dmMessages.scrollTop = els.dmMessages.scrollHeight;
+}
+
+function openMessagesScreen() {
+  if (!state.auth || !state.auth.user) { showScreen('auth'); switchAuthTab('signin'); return; }
+  loadDms();
+  state.dm.currentPeer = null;
+  if (els.dmThread) els.dmThread.dataset.open = 'false';
+  if (els.formNewDm) els.formNewDm.classList.add('hidden');
+  renderConversations();
+  showScreen('messages');
+  manageWatchChannel();
+  if (state.signaling && state.signaling.readyState === WebSocket.OPEN) sendIdentify();
+}
+
+function startNewDm() {
+  const raw = (els.newDmUsername.value || '').trim();
+  clearError(els.dmError);
+  if (!USERNAME_DM_RE.test(raw)) { showError(els.dmError, 'Enter a valid username (3–24 chars, letters/numbers/_/-).'); return; }
+  if (raw.toLowerCase() === myUsername().toLowerCase()) { showError(els.dmError, "You can't message yourself."); return; }
+  const key = raw.toLowerCase();
+  ensureConvo(key, raw);
+  saveDms();
+  els.newDmUsername.value = '';
+  els.formNewDm.classList.add('hidden');
+  renderConversations();
+  openThread(key);
+}
+
 /* ── WebRTC / signaling ──────────────────────────── */
 
 function sendSignal(msg) {
@@ -984,9 +1526,10 @@ function createPeerConnection(peerId, isInitiator) {
   state.peerConnections[peerId] = pc;
   state.iceRestartCount[peerId] = 0;
 
-  if (state.localStream) {
-    for (const track of state.localStream.getTracks()) {
-      pc.addTrack(track, state.localStream);
+  const outStream = getOutboundStream();
+  if (outStream) {
+    for (const track of outStream.getAudioTracks()) {
+      pc.addTrack(track, outStream);
     }
   }
 
@@ -1366,6 +1909,40 @@ async function sendChatFile(file) {
 
 /* ── Chat UI render ──────────────────────────────── */
 
+/* ── Saved chat (persist text per room) ──────────── */
+
+function chatLogKey(room) { return LS_CHAT_PREFIX + (room || 'lobby'); }
+
+function persistChatText(msg) {
+  const room = state.myRoom || state.intendedRoom;
+  if (!room) return;
+  try {
+    const key = chatLogKey(room);
+    const arr = JSON.parse(localStorage.getItem(key) || '[]');
+    if (arr.some((m) => m.id === msg.id)) return;
+    arr.push({ id: msg.id, name: msg.name, text: msg.text, ts: msg.ts, mine: !!msg.mine });
+    if (arr.length > CHAT_LOG_MAX) arr.splice(0, arr.length - CHAT_LOG_MAX);
+    localStorage.setItem(key, JSON.stringify(arr));
+  } catch {}
+}
+
+function loadSavedChat(room) {
+  let arr;
+  try { arr = JSON.parse(localStorage.getItem(chatLogKey(room)) || '[]'); } catch { arr = []; }
+  if (!arr.length) return;
+  for (const m of arr) {
+    appendChatMessage({
+      id: m.id, from: m.mine ? state.myPeerId : 'saved',
+      name: m.name, kind: 'text', text: m.text, ts: m.ts,
+      mine: !!m.mine, backfill: true, restored: true,
+    });
+  }
+}
+
+function clearSavedChat(room) {
+  try { localStorage.removeItem(chatLogKey(room)); } catch {}
+}
+
 function openChatPanel() {
   state.chatOpen = true;
   state.chatUnread = 0;
@@ -1407,7 +1984,9 @@ function ensureChatEmptyHidden() {
 }
 
 function appendChatMessage(msg) {
+  if (msg.id && state.chatMessages.some((m) => m.id === msg.id)) return;
   state.chatMessages.push(msg);
+  if (msg.kind === 'text' && !msg.restored) persistChatText(msg);
   const li = document.createElement('li');
   li.className = 'chat-msg' + (msg.mine ? ' is-mine' : '') + (msg.backfill ? ' is-backfill' : '');
   li.dataset.msgId = msg.id;
@@ -1754,6 +2333,12 @@ async function handleSignalingMessage(raw) {
     delete state.peerAuthed[msg.id];
   } else if (msg.type === 'stats') {
     applyStats(msg);
+  } else if (msg.type === 'dm') {
+    receiveDm(msg);
+  } else if (msg.type === 'dm-status') {
+    setDmStatus(msg.id, msg.status);
+  } else if (msg.type === 'identified') {
+    state.identitySent = true;
   } else if (msg.type === 'join-error') {
     showError(els.callError, msg.error || 'Failed to join');
     toast(msg.error || 'Failed to join', 3500);
@@ -1791,6 +2376,7 @@ function connectSignaling(url) {
       clearTimeout(timeout);
       state.wsLastMsg = Date.now();
       startWsHeartbeatWatchdog();
+      sendIdentify();
       resolve();
     };
     ws.onerror = (ev) => {
@@ -2043,6 +2629,7 @@ async function doConnect(room) {
     }
     sendSignal(join);
     showScreen('call');
+    loadSavedChat(room);
   } catch (err) {
     console.error('[renderer] connect failed:', err);
     state.intendedRoom = '';
@@ -2057,6 +2644,7 @@ async function doConnect(room) {
 /* ── Wiring ──────────────────────────────────────── */
 
 function attachEvents() {
+  wireAudioPanel();
   els.btnEnter.addEventListener('click', leaveLoading);
   els.btnInstallUpdate.addEventListener('click', () => {
     if (window.api && window.api.installUpdate) {
@@ -2094,6 +2682,24 @@ function attachEvents() {
   els.btnBackFromSettings.addEventListener('click', () => showScreen('welcome'));
   els.btnBackFromProfile.addEventListener('click', () => showScreen('welcome'));
   els.btnBackFromAuth.addEventListener('click', () => showScreen('welcome'));
+
+  if (els.btnMessages) els.btnMessages.addEventListener('click', openMessagesScreen);
+  if (els.btnBackFromMessages) els.btnBackFromMessages.addEventListener('click', () => showScreen('welcome'));
+  if (els.btnNewDm) els.btnNewDm.addEventListener('click', () => {
+    els.formNewDm.classList.toggle('hidden');
+    if (!els.formNewDm.classList.contains('hidden')) els.newDmUsername.focus();
+  });
+  if (els.formNewDm) els.formNewDm.addEventListener('submit', (ev) => { ev.preventDefault(); startNewDm(); });
+  if (els.btnDmBack) els.btnDmBack.addEventListener('click', closeThread);
+  if (els.dmForm) els.dmForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    sendDm(els.dmInput.value);
+    els.dmInput.value = '';
+    if (els.btnDmSend) els.btnDmSend.disabled = true;
+  });
+  if (els.dmInput) els.dmInput.addEventListener('input', () => {
+    if (els.btnDmSend) els.btnDmSend.disabled = els.dmInput.value.trim().length === 0;
+  });
 
   els.btnLogout.addEventListener('click', () => {
     setAuth(null);
@@ -2231,8 +2837,13 @@ function attachEvents() {
         els.eePanel.dataset.open = 'false';
         return;
       }
+      if (state.audioPanelOpen) { closeAudioPanel(); return; }
       if (state.micPopoverOpen) { closeMicPopover(); return; }
       if (state.drawerOpen) { closeDrawer(); return; }
+      if (state.currentScreen === 'messages') {
+        if (state.dm.currentPeer) { closeThread(); return; }
+        showScreen('welcome'); return;
+      }
       if (state.currentScreen === 'settings' || state.currentScreen === 'profile' || state.currentScreen === 'auth') {
         showScreen('welcome');
       }
@@ -2260,11 +2871,14 @@ function attachEvents() {
 
 async function init() {
   bindEls();
+  state.audioSettings = loadAudioSettings();
+  loadDms();
   applyTheme(loadTheme());
   attachEvents();
   loadRecent();
   renderRecent();
   renderProfileChip();
+  updateMessagesBadge();
   state.sessionId = getOrCreateSessionId();
   state.loadingStart = performance.now();
 
