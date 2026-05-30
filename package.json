@@ -57,7 +57,8 @@
     "publish": {
       "provider": "github",
       "owner": "Barcode162",
-      "repo": "BroTalk"
+      "repo": "BroTalk",
+      "releaseType": "release"
     }
   }
 }
