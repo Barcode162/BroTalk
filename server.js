@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const PORT = process.env.PORT || 3000;
 const TURN_USERNAME = process.env.TURN_USERNAME || '';
@@ -17,6 +18,31 @@ const TURN_URLS = (process.env.TURN_URLS || '')
 const DATABASE_URL = process.env.DATABASE_URL || '';
 let JWT_SECRET = process.env.JWT_SECRET || '';
 let jwtSecretSource = JWT_SECRET ? 'env' : 'pending';
+
+// ── Cloudflare R2 (S3-compatible) for profile pictures ──
+// Set on Render: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY,
+// R2_BUCKET, and R2_PUBLIC_BASE (the bucket's public URL, e.g.
+// https://pub-xxxx.r2.dev or a custom domain). Avatars stay disabled (501)
+// until all of these are present.
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || '';
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '';
+const R2_BUCKET = process.env.R2_BUCKET || '';
+const R2_PUBLIC_BASE = (process.env.R2_PUBLIC_BASE || '').replace(/\/+$/, '');
+const R2_READY = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET && R2_PUBLIC_BASE);
+const AVATAR_MAX_BYTES = 512 * 1024; // clients resize to ~128px; this is a safety ceiling
+
+let s3 = null;
+if (R2_READY) {
+  s3 = new S3Client({
+    region: 'auto',
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+  });
+  console.log('[server] R2 avatar storage enabled');
+} else {
+  console.warn('[server] R2 not configured — avatar upload will return 501');
+}
 
 const TOKEN_TTL = '30d';
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,24}$/;
@@ -51,10 +77,13 @@ async function initDb() {
         username VARCHAR(24) UNIQUE NOT NULL,
         username_lower VARCHAR(24) UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        avatar_url TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    // Additive migration for databases created before avatars existed.
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS server_secrets (
         key VARCHAR(48) PRIMARY KEY,
@@ -155,7 +184,10 @@ function validateCredentials(body) {
 }
 
 const app = express();
-app.use(express.json({ limit: '32kb' }));
+// Tight JSON limit for everything except avatar upload (which carries a base64
+// image and parses its own larger body in the route handler below).
+const jsonSmall = express.json({ limit: '32kb' });
+app.use((req, res, next) => (req.path === '/auth/avatar' ? next() : jsonSmall(req, res, next)));
 
 app.get('/healthz', (req, res) => res.type('text/plain').send('ok'));
 app.get('/', (req, res) => {
@@ -216,7 +248,7 @@ app.post('/auth/signup', async (req, res) => {
     );
     const user = result.rows[0];
     const token = signToken(user);
-    res.json({ token, user: { id: user.id, username: user.username } });
+    res.json({ token, user: { id: user.id, username: user.username, avatarUrl: null } });
   } catch (err) {
     if (err && err.code === '23505') {
       return res.status(409).json({ error: 'Username already taken' });
@@ -235,7 +267,7 @@ app.post('/auth/login', async (req, res) => {
   }
   try {
     const result = await pool.query(
-      `SELECT id, username, password_hash FROM users WHERE username_lower = $1`,
+      `SELECT id, username, password_hash, avatar_url FROM users WHERE username_lower = $1`,
       [username.toLowerCase()]
     );
     const row = result.rows[0];
@@ -244,19 +276,76 @@ app.post('/auth/login', async (req, res) => {
     if (!ok) return res.status(401).json({ error: 'Invalid username or password' });
     pool.query(`UPDATE users SET last_seen = NOW() WHERE id = $1`, [row.id]).catch(() => {});
     const token = signToken({ id: row.id, username: row.username });
-    res.json({ token, user: { id: row.id, username: row.username } });
+    res.json({ token, user: { id: row.id, username: row.username, avatarUrl: row.avatar_url || null } });
   } catch (err) {
     console.error('[server] login failed:', err.message);
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
-app.get('/auth/me', async (req, res) => {
+function bearer(req) {
   const header = req.get('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const claims = verifyToken(token);
+  return verifyToken(token);
+}
+
+app.get('/auth/me', async (req, res) => {
+  const claims = bearer(req);
   if (!claims) return res.status(401).json({ error: 'Invalid or expired token' });
-  res.json({ user: { id: claims.sub, username: claims.username } });
+  let avatarUrl = null;
+  if (dbReady) {
+    try {
+      const r = await pool.query(`SELECT avatar_url FROM users WHERE id = $1`, [claims.sub]);
+      avatarUrl = (r.rows[0] && r.rows[0].avatar_url) || null;
+    } catch { /* fall back to null */ }
+  }
+  res.json({ user: { id: claims.sub, username: claims.username, avatarUrl } });
+});
+
+// ── Profile picture upload ──
+// Body: { dataUrl: "data:image/png;base64,..." }. Clients resize to ~128px
+// before sending. Stored in R2 at avatars/<userId>.<ext>; public URL persisted
+// to users.avatar_url and returned. Cache-busted with ?v=<ts>.
+const AVATAR_MIME_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+
+app.post('/auth/avatar', express.json({ limit: '1mb' }), async (req, res) => {
+  const claims = bearer(req);
+  if (!claims) return res.status(401).json({ error: 'Invalid or expired token' });
+  if (!dbReady) return requireDb(res);
+  if (!R2_READY) return res.status(501).json({ error: 'Image storage not configured on the server yet' });
+
+  const dataUrl = String(req.body && req.body.dataUrl || '');
+  const m = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return res.status(400).json({ error: 'Expected a PNG, JPEG, or WebP data URL' });
+  const ext = AVATAR_MIME_EXT[m[1]];
+  let buf;
+  try { buf = Buffer.from(m[2], 'base64'); } catch { return res.status(400).json({ error: 'Bad image data' }); }
+  if (!buf.length || buf.length > AVATAR_MAX_BYTES) {
+    return res.status(413).json({ error: 'Image too large (max 512 KB after resize)' });
+  }
+
+  const key = `avatars/${claims.sub}.${ext}`;
+  try {
+    await s3.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: buf,
+      ContentType: m[1],
+      CacheControl: 'public, max-age=31536000, immutable',
+    }));
+  } catch (err) {
+    console.error('[server] avatar upload failed:', err.message);
+    return res.status(502).json({ error: 'Upload to storage failed' });
+  }
+
+  const url = `${R2_PUBLIC_BASE}/${key}?v=${Date.now()}`;
+  try {
+    await pool.query(`UPDATE users SET avatar_url = $1 WHERE id = $2`, [url, claims.sub]);
+  } catch (err) {
+    console.error('[server] avatar db update failed:', err.message);
+    return res.status(500).json({ error: 'Saved image but failed to update profile' });
+  }
+  res.json({ avatarUrl: url });
 });
 
 const httpServer = http.createServer(app);
@@ -304,6 +393,12 @@ function deliverDm(toLower, payload) {
   return n;
 }
 
+function sanitizeAvatarUrl(raw) {
+  const s = String(raw || '').trim();
+  if (!s || s.length > 512 || !/^https:\/\//i.test(s)) return null;
+  return s;
+}
+
 function normalizeRoom(raw) {
   const s = String(raw || '').toLowerCase().trim().slice(0, 32);
   return s || 'lobby';
@@ -325,7 +420,7 @@ function broadcastPeerList(roomCode) {
   for (const [id, entry] of room.entries()) {
     const others = ids
       .filter((x) => x !== id)
-      .map((i) => ({ id: i, name: room.get(i).name, authed: !!room.get(i).userId }));
+      .map((i) => ({ id: i, name: room.get(i).name, authed: !!room.get(i).userId, avatar: room.get(i).avatar || null }));
     send(entry.socket, { type: 'peers', peers: others, self: id, room: roomCode });
   }
 }
@@ -412,6 +507,7 @@ wss.on('connection', (socket, req) => {
       } else {
         name = String(msg.name || '').slice(0, 24).trim() || 'guest';
       }
+      const avatar = sanitizeAvatarUrl(msg.avatar);
 
       // Boot any previous socket for this same sessionId. Reconnects use this to
       // avoid leaving a ghost peer in the room until the 60s heartbeat times out.
@@ -442,7 +538,7 @@ wss.on('connection', (socket, req) => {
       roomCode = requestedRoom;
       sessionId = candidateSessionId;
       if (!rooms.has(roomCode)) rooms.set(roomCode, new Map());
-      rooms.get(roomCode).set(peerId, { socket, name, userId });
+      rooms.get(roomCode).set(peerId, { socket, name, userId, avatar });
       if (DM_RELAY && claims && claims.username) { socket.dmAuthName = claims.username; registerDmUser(claims.username, socket); }
       if (sessionId) sessionsById.set(sessionId, { socket, peerId, roomCode });
       send(socket, { type: 'welcome', id: peerId, room: roomCode, name });
@@ -452,12 +548,29 @@ wss.on('connection', (socket, req) => {
       return;
     }
 
+    // Live profile-picture change: update this socket's room entry + DM identity
+    // and rebroadcast so peers/contacts see the new picture without a rejoin.
+    if (msg.type === 'avatar-update') {
+      const avatar = sanitizeAvatarUrl(msg.avatar);
+      if (socket.dmUsername || socket.dmAuthName) socket.dmAvatar = avatar;
+      if (peerId && roomCode) {
+        const room = rooms.get(roomCode);
+        const entry = room && room.get(peerId);
+        if (entry) {
+          entry.avatar = avatar;
+          broadcastPeerList(roomCode);
+        }
+      }
+      return;
+    }
+
     // ── Direct messages (additive; independent of room membership) ──
     if (msg.type === 'identify') {
       if (!DM_RELAY) return;
       const claims = msg.token ? verifyToken(msg.token) : null;
       if (claims && claims.username) {
         socket.dmAuthName = claims.username;
+        socket.dmAvatar = sanitizeAvatarUrl(msg.avatar);
         registerDmUser(claims.username, socket);
         send(socket, { type: 'identified', username: claims.username });
       }
@@ -473,6 +586,7 @@ wss.on('connection', (socket, req) => {
       if (!to || !text) return;
       const payload = {
         type: 'dm', from: fromName.toLowerCase(), fromName,
+        fromAvatar: socket.dmAvatar || null,
         text, id: String(msg.id || ''), ts: Number(msg.ts) || Date.now(),
       };
       const delivered = deliverDm(to, payload);

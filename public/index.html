@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data: blob:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src ws: wss: http: https:; media-src 'self' blob:; img-src 'self' data: blob: https:;" />
     <title>BroTalk</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -496,7 +496,11 @@
 
         <div class="scroll-area scroll-area-narrow">
           <div class="profile-block">
-            <span class="avatar avatar-xl" id="profile-avatar-lg">?</span>
+            <button type="button" class="avatar-edit" id="btn-change-avatar" title="Change photo">
+              <span class="avatar avatar-xl" id="profile-avatar-lg">?</span>
+              <span class="avatar-edit-badge" aria-hidden="true">✎</span>
+            </button>
+            <input type="file" id="avatar-file-input" accept="image/png,image/jpeg,image/webp" class="hidden">
             <div class="profile-block-info">
               <h2 class="profile-display-name" id="profile-display-name">—</h2>
               <p class="profile-sub-lg" id="profile-sub-lg">—</p>

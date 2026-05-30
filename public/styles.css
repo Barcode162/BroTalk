@@ -1070,6 +1070,58 @@ kbd {
 .avatar-lg { width: 56px; height: 56px; font-size: 22px; }
 .avatar-xl { width: 72px; height: 72px; font-size: 28px; }
 
+/* Image avatars: fill the circle, overriding the text-glow themes. */
+.avatar-img {
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+.avatar:has(.avatar-img),
+.peer-avatar:has(.avatar-img),
+.dm-convo-avatar:has(.avatar-img) {
+  background: none;
+  text-shadow: none;
+  box-shadow: none;
+  overflow: hidden;
+  padding: 0;
+}
+
+/* Editable profile avatar: hover/✎ badge + busy spinner. */
+.avatar-edit {
+  position: relative;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 50%;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.avatar-edit:hover .avatar { border-color: var(--accent); }
+.avatar-edit-badge {
+  position: absolute;
+  right: -2px; bottom: -2px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  border: 2px solid var(--bg);
+}
+.avatar-edit.busy { pointer-events: none; opacity: 0.6; }
+.avatar-edit.busy .avatar-edit-badge {
+  border-top-color: transparent;
+  background: transparent;
+  border-radius: 50%;
+  color: transparent;
+  animation: avatar-spin 0.7s linear infinite;
+}
+@keyframes avatar-spin { to { transform: rotate(360deg); } }
+
 /* ── Conversation header / footer / scroll area ──────────────────────── */
 
 .conv-header {

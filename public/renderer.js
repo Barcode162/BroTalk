@@ -86,6 +86,7 @@ const state = {
   remoteAudios: {},
   peerNames: {},
   peerAuthed: {},
+  peerAvatars: {},
   iceRestartCount: {},
   myPeerId: null,
   myName: '',
@@ -156,6 +157,7 @@ function bindEls() {
     'reconnect-pill', 'reconnect-pill-text',
     'btn-back-from-settings', 'mic-select', 'btn-refresh-mics', 'about-details',
     'btn-back-from-profile', 'profile-avatar-lg', 'profile-display-name', 'profile-sub-lg', 'profile-details', 'btn-logout',
+    'btn-change-avatar', 'avatar-file-input',
     'btn-back-from-auth', 'tab-signin', 'tab-signup', 'form-signin', 'form-signup',
     'signin-username', 'signin-password', 'signin-error',
     'signup-username', 'signup-password', 'signup-error', 'btn-guest',
@@ -197,6 +199,50 @@ function escapeHtml(s) {
 function initialOf(name) {
   const c = (name || '?').trim().charAt(0).toUpperCase();
   return c || '?';
+}
+
+// The signed-in user's own avatar URL (null if none / guest).
+function myAvatar() {
+  return (state.auth && state.auth.user && state.auth.user.avatarUrl) || null;
+}
+
+// Inner HTML for a .avatar/.peer-avatar/etc. span: an <img> if a URL exists,
+// otherwise the name's initial. URL is attribute-escaped.
+function avatarInner(url, name) {
+  if (url) return `<img class="avatar-img" src="${escapeHtml(url)}" alt="" referrerpolicy="no-referrer" loading="lazy">`;
+  return escapeHtml(initialOf(name));
+}
+
+// Imperatively fill an existing avatar element.
+function applyAvatar(el, url, name) {
+  if (!el) return;
+  el.innerHTML = avatarInner(url, name);
+}
+
+// Downscale a picked image file to a square <=128px PNG data URL for upload.
+function fileToAvatarDataUrl(file, size = 128) {
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\//.test(file.type)) return reject(new Error('Please choose an image file'));
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read that file'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('That image could not be loaded'));
+      img.onload = () => {
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 /* ── Toast ───────────────────────────────────────── */
@@ -481,12 +527,12 @@ function toggleEe() {
 
 function renderProfileChip() {
   const u = state.auth ? state.auth.user : null;
-  const initial = u ? initialOf(u.username) : '?';
   const name = u ? u.username : 'Sign in';
   const sub = u ? 'view profile' : 'guest';
 
-  if (els.profileAvatar) els.profileAvatar.textContent = initial;
-  if (els.drawerAvatar) els.drawerAvatar.textContent = initial;
+  const av = u ? myAvatar() : null;
+  applyAvatar(els.profileAvatar, av, u ? u.username : '?');
+  applyAvatar(els.drawerAvatar, av, u ? u.username : '?');
   if (els.drawerProfileName) els.drawerProfileName.textContent = name;
   if (els.drawerProfileSub) els.drawerProfileSub.textContent = sub;
 
@@ -508,7 +554,7 @@ function renderProfileScreen() {
     return;
   }
   const u = state.auth.user;
-  els.profileAvatarLg.textContent = initialOf(u.username);
+  applyAvatar(els.profileAvatarLg, myAvatar(), u.username);
   els.profileDisplayName.textContent = u.username;
   els.profileSubLg.textContent = 'signed in';
   els.profileDetails.innerHTML = `
@@ -623,6 +669,17 @@ async function apiLogin(username, password) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Login failed');
+  return data;
+}
+
+async function apiUploadAvatar(token, dataUrl) {
+  const res = await fetch(state.httpBaseUrl + '/auth/avatar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+    body: JSON.stringify({ dataUrl }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Upload failed');
   return data;
 }
 
@@ -1343,7 +1400,7 @@ function myUsername() {
 function sendIdentify() {
   if (!state.auth || !state.auth.token) return;
   if (!state.signaling || state.signaling.readyState !== WebSocket.OPEN) return;
-  sendSignal({ type: 'identify', token: state.auth.token });
+  sendSignal({ type: 'identify', token: state.auth.token, avatar: myAvatar() });
   state.identitySent = true;
 }
 
@@ -1351,6 +1408,7 @@ function receiveDm(m) {
   const key = String(m.from || '').toLowerCase();
   if (!key) return;
   const convo = ensureConvo(key, m.fromName || m.from);
+  if (m.fromAvatar) convo.avatar = m.fromAvatar;
   if (m.id && convo.messages.some((x) => x.id === m.id)) return;
   const msg = { id: m.id || crypto.randomUUID(), text: String(m.text || '').slice(0, 2000), ts: Number(m.ts) || Date.now(), mine: false };
   convo.messages.push(msg);
@@ -1411,7 +1469,7 @@ function renderConversations() {
     const li = document.createElement('li');
     li.className = 'dm-convo' + (c.unread ? ' has-unread' : '');
     li.innerHTML = `
-      <span class="dm-convo-avatar">${escapeHtml(initialOf(c.name))}</span>
+      <span class="dm-convo-avatar">${avatarInner(c.avatar, c.name)}</span>
       <div class="dm-convo-main">
         <span class="dm-convo-name">${escapeHtml(c.name)}</span>
         <span class="dm-convo-preview">${last ? (last.mine ? 'you: ' : '') + escapeHtml(last.text.slice(0, 60)) : 'no messages yet'}</span>
@@ -2237,12 +2295,13 @@ function renderPeersList() {
     const connState = conn ? conn.connectionState || 'connecting' : 'unknown';
     const name = state.peerNames[id] || '(unnamed)';
     const authed = !!state.peerAuthed[id];
+    const avatar = state.peerAvatars[id] || null;
     const dotClass =
       connState === 'connected' ? 'connected' :
       connState === 'failed' || connState === 'closed' ? 'failed' :
       'connecting';
     li.innerHTML = `
-      <span class="peer-avatar">${escapeHtml(initialOf(name))}</span>
+      <span class="peer-avatar">${avatarInner(avatar, name)}</span>
       <div class="peer-main">
         <span class="peer-name">${escapeHtml(name)}${authed ? '<span class="peer-badge">verified</span>' : ''}</span>
         <span class="peer-meta">${id.slice(0, 6)}</span>
@@ -2270,7 +2329,7 @@ async function handleSignalingMessage(raw) {
     state.reconnectAttempt = 0;
     els.roomDisplay.textContent = msg.room;
     els.selfName.textContent = state.myName || msg.id.slice(0, 8);
-    els.selfAvatar.textContent = initialOf(state.myName);
+    applyAvatar(els.selfAvatar, myAvatar(), state.myName);
     els.selfRole.textContent = state.auth && state.auth.user ? 'you · signed in' : 'you · guest';
     pushRecent(msg.room);
     hideReconnectPill();
@@ -2279,6 +2338,7 @@ async function handleSignalingMessage(raw) {
     for (const p of msg.peers) {
       state.peerNames[p.id] = p.name || '';
       state.peerAuthed[p.id] = !!p.authed;
+      state.peerAvatars[p.id] = p.avatar || null;
       if (!state.peerConnections[p.id] && p.id !== state.myPeerId) {
         const initiator = state.myPeerId && state.myPeerId < p.id;
         createPeerConnection(p.id, initiator);
@@ -2291,6 +2351,7 @@ async function handleSignalingMessage(raw) {
       if (!incomingIds.includes(id)) {
         delete state.peerNames[id];
         delete state.peerAuthed[id];
+        delete state.peerAvatars[id];
       }
     }
     renderPeersList();
@@ -2331,6 +2392,7 @@ async function handleSignalingMessage(raw) {
     cleanupPeer(msg.id);
     delete state.peerNames[msg.id];
     delete state.peerAuthed[msg.id];
+    delete state.peerAvatars[msg.id];
   } else if (msg.type === 'stats') {
     applyStats(msg);
   } else if (msg.type === 'dm') {
@@ -2453,7 +2515,7 @@ async function doReconnect() {
       for (const id of Object.keys(state.peerConnections)) cleanupPeer(id);
       await connectSignaling(state.signalingUrl);
       const join = { type: 'join', room: state.intendedRoom, sessionId: state.sessionId };
-      if (state.auth && state.auth.token) join.token = state.auth.token;
+      if (state.auth && state.auth.token) { join.token = state.auth.token; join.avatar = myAvatar(); }
       else join.name = 'guest';
       sendSignal(join);
       hideReconnectPill();
@@ -2509,6 +2571,7 @@ function disconnectAll() {
   state.myRoom = '';
   state.peerNames = {};
   state.peerAuthed = {};
+  state.peerAvatars = {};
   state.dataChannels = {};
   state.iceRestartCount = {};
   state.isMuted = false;
@@ -2624,6 +2687,7 @@ async function doConnect(room) {
     const join = { type: 'join', room, sessionId: state.sessionId };
     if (state.auth && state.auth.token) {
       join.token = state.auth.token;
+      join.avatar = myAvatar();
     } else {
       join.name = 'guest';
     }
@@ -2706,6 +2770,37 @@ function attachEvents() {
     toast('Signed out');
     showScreen('welcome');
   });
+
+  if (els.btnChangeAvatar && els.avatarFileInput) {
+    els.btnChangeAvatar.addEventListener('click', () => {
+      if (!state.auth || !state.auth.token) { showScreen('auth'); return; }
+      els.avatarFileInput.click();
+    });
+    els.avatarFileInput.addEventListener('change', async () => {
+      const file = els.avatarFileInput.files && els.avatarFileInput.files[0];
+      els.avatarFileInput.value = ''; // allow re-picking the same file later
+      if (!file || !state.auth || !state.auth.token) return;
+      els.btnChangeAvatar.classList.add('busy');
+      try {
+        const dataUrl = await fileToAvatarDataUrl(file);
+        const { avatarUrl } = await apiUploadAvatar(state.auth.token, dataUrl);
+        // Persist onto the in-memory user and re-render everywhere it shows.
+        state.auth.user = { ...(state.auth.user || {}), avatarUrl };
+        renderProfileChip();
+        renderProfileScreen();
+        applyAvatar(els.selfAvatar, avatarUrl, state.myName);
+        // Live-update room peers + DM contacts with the new picture (additive).
+        if (state.signaling && state.signaling.readyState === WebSocket.OPEN) {
+          sendSignal({ type: 'avatar-update', avatar: avatarUrl });
+        }
+        toast('Profile picture updated');
+      } catch (err) {
+        toast(err.message || 'Could not update picture');
+      } finally {
+        els.btnChangeAvatar.classList.remove('busy');
+      }
+    });
+  }
 
   els.tabSignin.addEventListener('click', () => switchAuthTab('signin'));
   els.tabSignup.addEventListener('click', () => switchAuthTab('signup'));

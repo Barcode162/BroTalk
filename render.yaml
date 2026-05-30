@@ -1,3 +1,16 @@
+# Render Blueprint — apply from the Render dashboard (New → Blueprint) against
+# the Barcode162/BroTalk repo. This provisions the web service AND a free
+# Postgres database, and wires DATABASE_URL + a generated JWT_SECRET for you.
+#
+# The five R2_* vars are marked sync:false — Render will prompt you to paste
+# them on apply (or set them later under the service's Environment tab). Until
+# they're set, accounts work but profile-picture upload returns 501. See
+# AVATAR_SETUP.md for where to get the R2 values.
+
+databases:
+  - name: brotalk-db
+    plan: free
+
 services:
   - type: web
     name: brotalk
@@ -10,3 +23,19 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: brotalk-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_BASE
+        sync: false
